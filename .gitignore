@@ -1,0 +1,15 @@
+.venv/
+.build/
+__pycache__/
+tests/__pycache__/
+dist/
+verification/
+*.spec
+
+# 개인 데이터와 로컬 설정
+settings.json
+conversations*.json
+*.zip
+.env
+.env.*
+*.lnk
