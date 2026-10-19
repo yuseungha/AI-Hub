@@ -155,6 +155,14 @@ class Index:
     def chatgpt_prompts(self):
         return [entry for entry in self.files.values() if entry.chatgpt_prompt]
 
+    def job_files(self, job_id):
+        """Indexed result files listed in the job's task.json (files that still exist)."""
+        keys = dict.fromkeys(rel_key(item) for item in self.jobs[job_id].files)  # ordered, no duplicates
+        return [self.files[key] for key in keys if key in self.files]
+
+    def job_size(self, job_id):
+        return sum(entry.size for entry in self.job_files(job_id))
+
 
 def read_json(path: Path):
     """Return parsed JSON or None for missing/corrupt files (never raises)."""

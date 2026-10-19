@@ -19,7 +19,8 @@ from PySide6.QtGui import QDesktopServices, QPixmap, QFont, QKeySequence, QShort
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QLabel, QTextBrowser, QPlainTextEdit, QStackedWidget, QScrollArea,
-    QFileDialog, QCheckBox, QHeaderView, QMessageBox, QApplication, QFrame, QMenu, QAbstractItemView)
+    QFileDialog, QCheckBox, QHeaderView, QMessageBox, QApplication, QFrame, QMenu, QAbstractItemView,
+    QStyledItemDelegate, QStyle)
 
 import chatgpt
 import fileops
@@ -32,6 +33,7 @@ AI_COLORS = {"codex": "#2563EB", "claude": "#C2410C", "chatgpt": "#0E8A6A", UNKN
 ROLE = Qt.ItemDataRole.UserRole
 SORT_ROLE = int(Qt.ItemDataRole.UserRole) + 1  # numeric sort key per column
 KEY_ROLE = int(Qt.ItemDataRole.UserRole) + 2  # tree node key, used to restore selection
+GROUP_ROLE = int(Qt.ItemDataRole.UserRole) + 3  # status colour group of a list row
 COLUMNS = ["종류", "이름", "AI", "상태", "크기", "날짜"]
 SIZE_COLUMN, DATE_COLUMN = 4, 5
 STALE_LABELS = {90: "90일 이상", 180: "180일 이상", 365: "1년 이상"}
@@ -66,6 +68,11 @@ QTreeWidget { background: white; border: 1px solid #E6E5EF; border-radius: 10px;
 QTreeWidget::item { padding: 5px 4px; border-radius: 6px; }
 QTreeWidget::item:hover { background: #F1F0FB; }
 QTreeWidget::item:selected { background: #E9E7FB; color: #2B2A3A; }
+QTreeWidget#itemList::item { border-radius: 0; }
+QTreeWidget#itemList::item:hover { background: #FFFFFF; }
+QTreeWidget#itemList::item:selected { background: #D9D5FA; color: #1F1D33; }
+QLabel#legendChip { color: #3B3A4E; border-radius: 6px; padding: 2px 8px; font-size: 11px; }
+QLabel#legendTitle { color: #75798F; font-size: 11px; }
 QHeaderView::section { background: white; border: none; border-bottom: 1px solid #ECEBF3; padding: 6px; color: #75798F; font-weight: 600; }
 QTextBrowser, QPlainTextEdit, QScrollArea { background: white; border: 1px solid #E6E5EF; border-radius: 10px; }
 QLabel#previewTitle { font-size: 14px; font-weight: 700; color: #2B2A3A; }
@@ -94,6 +101,60 @@ def fmt_time(value):
     if isinstance(value, (int, float)):
         value = datetime.fromtimestamp(value)
     return value.strftime("%Y-%m-%d %H:%M") if value else ""
+
+
+DEFAULT_COLUMN_WIDTHS = (48, 180, 96, 120, 72, 118)  # fits the default list pane
+MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH = 36, 2000  # drag limits; saved widths are clamped the same way
+STATUS_GROUPS = {"completed": "done", "reviewed": "done", "passed": "done", "completed_unverified": "done",
+                 "active": "active", "checked": "checked", "needs_repair": "repair"}
+STATUS_COLORS = {"done": "#E2F4E7", "active": "#FFF3C9", "checked": "#E2EDFC", "repair": "#FBE3E3",
+                 "unknown": "#ECECF1"}
+STATUS_LEGEND = (("done", "완료"), ("active", "진행 중"), ("checked", "검사 통과"), ("repair", "수정 필요"),
+                 ("unknown", "미상"))
+
+
+class StatusDelegate(QStyledItemDelegate):
+    """Paints the status colour behind each cell of a row. Item background brushes are
+    ignored once the list has a QTreeWidget::item style sheet rule, so the colour is
+    drawn here; hover and selection from the style sheet still paint on top."""
+
+    def paint(self, painter, option, index):
+        group = index.siblingAtColumn(0).data(GROUP_ROLE)
+        # The row under the mouse cursor stays white (style sheet hover rule) so the
+        # cursor position stands out; selected rows keep the selection colour.
+        plain = option.state & (QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_MouseOver)
+        if group and not plain:
+            painter.fillRect(option.rect, QColor(STATUS_COLORS[group]))
+        super().paint(painter, option, index)
+        if index.column() < index.model().columnCount() - 1:
+            draw_column_separator(painter, option.rect)
+
+
+SEPARATOR_COLOR = "#D5D5DE"
+SEPARATOR_FRACTION = 0.5  # share of the cell height the column separator covers
+
+
+def draw_column_separator(painter, rect):
+    """Short light-grey vertical line on the right edge of a cell, vertically centred,
+    so columns read as separate without boxing the cells in."""
+    length = max(6, round(rect.height() * SEPARATOR_FRACTION))
+    top = rect.top() + (rect.height() - length) // 2
+    painter.save()
+    painter.fillRect(rect.right(), top, 1, length, QColor(SEPARATOR_COLOR))
+    painter.restore()
+
+
+class SeparatedHeader(QHeaderView):
+    """List header drawing the same short separators between sections."""
+
+    def paintSection(self, painter, rect, logical):
+        super().paintSection(painter, rect, logical)
+        if self.visualIndex(logical) < self.count() - 1:
+            draw_column_separator(painter, rect)
+
+
+def status_group(job):
+    return STATUS_GROUPS.get(job.status, "unknown")
 
 
 def status_text(job):
@@ -270,28 +331,57 @@ class MainWindow(QMainWindow):
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.currentItemChanged.connect(self.on_tree)
-        self.list = QTreeWidget()
+        self.list = QTreeWidget(objectName="itemList")
         self.list.setRootIsDecorated(False)
+        separated = SeparatedHeader(Qt.Orientation.Horizontal, self.list)
+        separated.setSectionsClickable(True)  # a fresh QHeaderView is not clickable; sorting needs it
+        separated.setHighlightSections(False)
+        separated.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.list.setHeader(separated)
         self.list.setHeaderLabels(COLUMNS)
         self.list.setSortingEnabled(True)
         self.list.setUniformRowHeights(True)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.list.setItemDelegate(StatusDelegate(self.list))
         header = self.list.header()
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column, width in ((0, 52), (2, 100), (3, 100), (SIZE_COLUMN, 72), (DATE_COLUMN, 122)):
-            self.list.setColumnWidth(column, width)
+        # Every column is user-resizable by dragging its header edge; none stretches.
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(False)
+        header.setMinimumSectionSize(MIN_COLUMN_WIDTH)
+        header.setMaximumSectionSize(MAX_COLUMN_WIDTH)
+        for column, width in enumerate(self.saved_column_widths() or DEFAULT_COLUMN_WIDTHS):
+            self.list.setColumnWidth(column, width)
         self.list.headerItem().setTextAlignment(SIZE_COLUMN, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.column_timer = QTimer(self, singleShot=True, interval=400)
+        self.column_timer.timeout.connect(self.save_column_widths)
+        header.sectionResized.connect(lambda *_: self.column_timer.start())
         self.list.currentItemChanged.connect(self.on_list)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self.show_list_menu)
         self.trash = fileops.default_trash  # replaced by a fake in the self-test
         self.last_result: fileops.Result | None = None
         self.preview = PreviewPane(self)
+        list_box = QWidget()
+        list_layout = QVBoxLayout(list_box)
+        list_layout.setContentsMargins(0, 0, 0, 0)
+        list_layout.setSpacing(6)
+        legend = QHBoxLayout()
+        legend.setSpacing(4)
+        legend.addWidget(QLabel("상태", objectName="legendTitle"))
+        self.legend_chips = {}
+        for group, label in STATUS_LEGEND:
+            chip = QLabel(label, objectName="legendChip")
+            chip.setStyleSheet(f"background: {STATUS_COLORS[group]};")
+            legend.addWidget(chip)
+            self.legend_chips[group] = chip
+        legend.addStretch()
+        list_layout.addLayout(legend)
+        list_layout.addWidget(self.list, 1)
         splitter.addWidget(self.tree)
-        splitter.addWidget(self.list)
+        splitter.addWidget(list_box)
         splitter.addWidget(self.preview)
-        splitter.setSizes([280, 560, 600])
+        splitter.setSizes([260, 660, 520])
         splitter.setStretchFactor(2, 1)
         outer.addWidget(splitter, 1)
         QShortcut(QKeySequence("Ctrl+F"), self, self.search.setFocus)
@@ -568,6 +658,24 @@ class MainWindow(QMainWindow):
             self.preview.show_html("점검 필요", f"{len(index.problems)}건",
                                    "<ul>" + "".join(f"<li>{escape(text)}</li>" for text in index.problems) + "</ul>")
 
+    def saved_column_widths(self):
+        """Saved widths checked column by column: a bad entry falls back to that column's
+        default and out-of-range values are clamped to the header's drag limits, so one
+        column never resets the others."""
+        widths = (self.settings or {}).get("list_columns")
+        if not isinstance(widths, list):
+            return None
+        result = []
+        for column, default in enumerate(DEFAULT_COLUMN_WIDTHS):
+            width = widths[column] if column < len(widths) else None
+            valid = isinstance(width, int) and not isinstance(width, bool)
+            result.append(min(max(width, MIN_COLUMN_WIDTH), MAX_COLUMN_WIDTH) if valid else default)
+        return result
+
+    def save_column_widths(self):
+        if self.settings is not None:
+            self.settings.update(list_columns=[self.list.columnWidth(column) for column in range(len(COLUMNS))])
+
     def ais_of(self, job_ids):
         found = set()
         for job_id in job_ids:
@@ -577,28 +685,42 @@ class MainWindow(QMainWindow):
     def fill_list(self, jobs=(), files=(), convs=(), sort=(DATE_COLUMN, Qt.SortOrder.DescendingOrder)):
         self.list.setSortingEnabled(False)
         self.list.clear()
-        rows = []  # (texts, data, tooltip, size or None, timestamp or None)
+        index = self.index
+        rows = []  # (texts, data, tooltip, size or None, timestamp or None, status group or None, size tooltip)
         for job in jobs:
-            rows.append((["작업", job.title, ai_text(job.ais), status_text(job), "", fmt_time(job.when)],
-                         ("job", job.id), job.request or job.goal, None, job.when.timestamp() if job.when else None))
+            linked = index.job_files(job.id)
+            size = sum(entry.size for entry in linked)
+            rows.append((["작업", job.title, ai_text(job.ais), status_text(job), human_size(size), fmt_time(job.when)],
+                         ("job", job.id), job.request or job.goal, size, job.when.timestamp() if job.when else None,
+                         status_group(job), f"작업 결과 파일 {len(linked)}개 합계"))
         for entry in files:
-            rows.append((["파일", entry.rel, ai_text(self.index.file_ais(entry)),
+            # A linked file takes the colour of the most recent job that lists it.
+            latest = index.jobs[max(entry.jobs)] if entry.jobs else None
+            rows.append((["파일", entry.rel, ai_text(index.file_ais(entry)),
                           f"작업 {len(entry.jobs)}건" if entry.jobs else ("ChatGPT 프롬프트" if entry.chatgpt_prompt else "미분류"),
                           human_size(entry.size), fmt_time(entry.mtime)],
-                         ("file", rel_key(entry.rel)), entry.rel, entry.size, entry.mtime))
+                         ("file", rel_key(entry.rel)), entry.rel, entry.size, entry.mtime,
+                         status_group(latest) if latest else None, ""))
         for conv in convs:
-            rows.append((["대화", conv.title, "ChatGPT", f"메시지 {len(conv.messages)}", "", fmt_time(conv.when)],
-                         ("conv", conv.id), conv.title, None, conv.when.timestamp() if conv.when else None))
+            size = sum(len(message.text.encode("utf-8")) for message in conv.messages)
+            rows.append((["대화", conv.title, "ChatGPT", f"메시지 {len(conv.messages)}", human_size(size),
+                          fmt_time(conv.when)],
+                         ("conv", conv.id), conv.title, size, conv.when.timestamp() if conv.when else None,
+                         None, "대화 텍스트 크기"))
         items = []
-        for values, data, tip, size, stamp in rows:
+        for values, data, tip, size, stamp, group, size_tip in rows:
             item = SortItem(values)
             item.setData(0, ROLE, data)
             item.setToolTip(1, tip[:600])
             item.setTextAlignment(SIZE_COLUMN, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if size_tip:
+                item.setToolTip(SIZE_COLUMN, size_tip)
             if size is not None:
                 item.setData(SIZE_COLUMN, SORT_ROLE, float(size))
             if stamp is not None:
                 item.setData(DATE_COLUMN, SORT_ROLE, float(stamp))
+            if group:
+                item.setData(0, GROUP_ROLE, group)  # painted by StatusDelegate
             items.append(item)
         self.list.addTopLevelItems(items)
         self.list.setSortingEnabled(True)

@@ -258,9 +258,12 @@ def check_file_ops(app, window, root: Path, work: Path, shots: Path):
     """Size sort, stale views and copy/move/trash on the throwaway fixture."""
     import os
     from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtGui import QColor
     from PySide6.QtWidgets import QApplication
     from indexer import rel_key, FileEntry
-    from ui import SORT_ROLE, KEY_ROLE, SIZE_COLUMN
+    from PySide6.QtWidgets import QHeaderView
+    from preview import human_size
+    from ui import (SORT_ROLE, KEY_ROLE, GROUP_ROLE, SIZE_COLUMN, STATUS_COLORS, MainWindow, Settings)
 
     f = {}
     report = root / "output" / "report"
@@ -282,10 +285,129 @@ def check_file_ops(app, window, root: Path, work: Path, shots: Path):
                               and descending == ascending[::-1]
                               and list_rows(window)[0].text(SIZE_COLUMN) == "1.2 KB")
     window.select_node("project:output/report")
+    app.processEvents()
+    index = window.index
+    rows = {tuple(row.data(0, 256)): row for row in list_rows(window)}
+    size_a, size_b = index.job_size(JOB_A), index.job_size(JOB_B)
+    # Job A lists README.md, data.json, summary.md; job B lists main.py, chart.png and a missing file.
+    f["job_size_shown"] = (size_a == sum(index.files[rel_key(p)].size for p in
+                                         ("output/report/README.md", "output/report/data.json", "output/summary.md"))
+                           and size_b == sum(index.files[rel_key(p)].size for p in
+                                             ("tool/main.py", "output/report/chart.png"))
+                           and rows[("job", JOB_A)].text(SIZE_COLUMN) == human_size(size_a)
+                           and rows[("job", JOB_B)].text(SIZE_COLUMN) == human_size(size_b)
+                           and rows[("job", JOB_A)].data(SIZE_COLUMN, SORT_ROLE) == float(size_a))
     window.list.sortByColumn(SIZE_COLUMN, Qt.SortOrder.AscendingOrder)
-    rows = list_rows(window)
-    f["size_sort_jobs_without_size"] = ([row.data(0, 256)[0] for row in rows[:2]] == ["job", "job"]
-                                        and rows[0].text(SIZE_COLUMN) == "")
+    ordered = [row.data(SIZE_COLUMN, SORT_ROLE) for row in list_rows(window)]
+    f["size_sort_includes_jobs"] = ordered == sorted(ordered) and None not in ordered
+
+    # Status colours: jobs by status, linked files by their latest job, unlinked files plain.
+    groups = {key: row.data(0, GROUP_ROLE) for key, row in rows.items()}
+    f["status_groups"] = (groups[("job", JOB_A)] == "done" and groups[("job", JOB_B)] == "repair"
+                          and groups[("file", rel_key("output/report/README.md"))] == "done"
+                          and groups[("file", rel_key("output/report/chart.png"))] == "repair"
+                          and groups[("file", rel_key("output/report/notes.txt"))] is None
+                          and set(window.legend_chips) == set(STATUS_COLORS))
+    window.list.clearSelection()
+    window.list.setCurrentItem(None)
+    app.processEvents()
+    shot = window.list.viewport().grab().toImage()
+
+    def row_colour(key):
+        rect = window.list.visualItemRect(rows[key])
+        ratio = shot.devicePixelRatio()  # e.g. 1.5 on a 150% Windows display
+        return shot.pixelColor(int((rect.left() + 3) * ratio), int(rect.center().y() * ratio)).name().upper()
+    f["status_colours_painted"] = (row_colour(("job", JOB_A)) == STATUS_COLORS["done"].upper()
+                                   and row_colour(("job", JOB_B)) == STATUS_COLORS["repair"].upper()
+                                   and row_colour(("file", rel_key("output/report/notes.txt"))) == "#FFFFFF")
+    window.grab().save(str(shots / "fixture-colours.png"))
+
+    # Column separators: short light-grey vertical marks between columns only.
+    from ui import SEPARATOR_COLOR, SeparatedHeader
+
+    def close(colour, hex_value, tolerance=14):
+        target = QColor(hex_value)
+        return all(abs(a - b) <= tolerance for a, b in ((colour.red(), target.red()),
+                                                        (colour.green(), target.green()), (colour.blue(), target.blue())))
+
+    def pixel(image, x, y):
+        ratio = image.devicePixelRatio()
+        return image.pixelColor(int((x + 0.5) * ratio), int((y + 0.5) * ratio))
+    header = window.list.header()
+    row = window.list.visualItemRect(rows[("job", JOB_A)])  # green 'done' row, not selected
+    marks, ends, inside = [], [], []
+    for column in range(header.count() - 1):
+        x = header.sectionViewportPosition(column) + header.sectionSize(column) - 1
+        marks.append(close(pixel(shot, x, row.center().y()), SEPARATOR_COLOR))
+        ends.append(close(pixel(shot, x, row.top() + 1), STATUS_COLORS["done"], 4)
+                    and close(pixel(shot, x, row.bottom() - 1), STATUS_COLORS["done"], 4))
+        inside.append(close(pixel(shot, x - 3, row.center().y()), STATUS_COLORS["done"], 4))
+    last = header.sectionViewportPosition(header.count() - 1) + header.sectionSize(header.count() - 1) - 1
+    no_horizontal = all(close(pixel(shot, header.sectionViewportPosition(c) + 4, row.bottom()), STATUS_COLORS["done"], 4)
+                        for c in range(header.count()))
+    head = header.grab().toImage()
+    head_marks = [close(pixel(head, header.sectionViewportPosition(c) + header.sectionSize(c) - 1, header.height() // 2),
+                        SEPARATOR_COLOR) for c in range(header.count() - 1)]
+    # Row under the mouse cursor turns white; other rows keep their status colour and a
+    # selected row keeps the selection colour.
+    from PySide6.QtTest import QTest
+    viewport = window.list.viewport()
+    row_b = window.list.visualItemRect(rows[("job", JOB_B)])
+    window.list.setCurrentItem(rows[("job", JOB_B)])  # selected row, cursor elsewhere
+    app.processEvents()
+    window.raise_()
+    window.activateWindow()
+    # Native Windows delivers the real cursor move through the event loop, so wait briefly.
+    QTest.mouseMove(viewport, row.center())  # hover job A's green row
+    QTest.qWait(150)
+    hover_shot = viewport.grab().toImage()
+    hovered = pixel(hover_shot, row.left() + 3, row.center().y())
+    selected = pixel(hover_shot, row_b.left() + 3, row_b.center().y())
+    QTest.mouseMove(viewport, row_b.center())  # leave job A
+    QTest.qWait(150)
+    after = pixel(viewport.grab().toImage(), row.left() + 3, row.center().y())
+    f["hover_row_white"] = (close(hovered, "#FFFFFF", 3) and close(selected, "#D9D5FA", 6)
+                            and close(after, STATUS_COLORS["done"], 4)
+                            and close(pixel(hover_shot, header.sectionViewportPosition(0) + header.sectionSize(0) - 1,
+                                            row.center().y()), SEPARATOR_COLOR))
+    window.list.clearSelection()
+    window.list.setCurrentItem(None)
+    f["column_separators"] = (all(marks) and all(ends) and all(inside) and no_horizontal
+                              and not close(pixel(shot, last, row.center().y()), SEPARATOR_COLOR, 4)
+                              and isinstance(header, SeparatedHeader) and all(head_marks)
+                              and header.sectionsClickable())
+
+    window.select_node("ai:chatgpt")
+    app.processEvents()
+    convs = [row for row in list_rows(window) if row.data(0, 256)[0] == "conv"]
+    f["conversation_size_shown"] = (len(convs) == 2 and all(row.data(SIZE_COLUMN, SORT_ROLE) is not None for row in convs)
+                                    and all(row.data(0, GROUP_ROLE) is None for row in convs)
+                                    and any(row.text(SIZE_COLUMN) not in ("", "0 B") for row in convs))
+
+    # Every column resizable by dragging, none stretching; widths persist in settings.
+    header = window.list.header()
+    f["columns_resizable"] = (all(header.sectionResizeMode(column) == QHeaderView.ResizeMode.Interactive
+                                  for column in range(header.count()))
+                              and not header.stretchLastSection())
+    window.list.setColumnWidth(1, 333)
+    window.list.setColumnWidth(SIZE_COLUMN, 91)
+    window.save_column_widths()
+    again = MainWindow(root, Settings(window.settings.path))
+    f["column_widths_saved"] = (again.list.columnWidth(1) == 333 and again.list.columnWidth(SIZE_COLUMN) == 91
+                                and json.loads(window.settings.path.read_text(encoding="utf-8"))["list_columns"][1] == 333)
+    again.close()
+
+    # Out-of-range or broken entries affect only their own column; dragging is capped the same way.
+    from ui import MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, DEFAULT_COLUMN_WIDTHS
+    window.list.setColumnWidth(1, 333)
+    window.list.setColumnWidth(SIZE_COLUMN, 2400)
+    capped = window.list.columnWidth(SIZE_COLUMN)
+    window.settings.update(list_columns=[48, 333, "x", 5, 2400, 118])
+    third = MainWindow(root, Settings(window.settings.path))
+    f["column_widths_per_column"] = (capped == MAX_COLUMN_WIDTH
+                                     and [third.list.columnWidth(c) for c in range(6)]
+                                     == [48, 333, DEFAULT_COLUMN_WIDTHS[2], MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH, 118])
+    third.close()
 
     def stale_rows(key):
         window.select_node(key)

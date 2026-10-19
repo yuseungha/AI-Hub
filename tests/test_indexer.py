@@ -62,6 +62,16 @@ class IndexerTest(unittest.TestCase):
         self.assertEqual(len(index.projects["output/report"].files), 2)
         self.assertTrue(any("2개까지만" in text for text in index.problems))
 
+    def test_job_size_sums_existing_listed_files(self):
+        files = self.index.files
+        expected = sum(files[rel_key(path)].size for path in ("tool/main.py", "output/report/chart.png"))
+        self.assertEqual(self.index.job_size(smoke.JOB_B), expected)  # gone.txt is missing, not counted
+        self.assertEqual([entry.rel for entry in self.index.job_files(smoke.JOB_B)],
+                         ["tool/main.py", "output/report/chart.png"])
+        self.assertEqual(self.index.job_size(smoke.JOB_C), 0)  # corrupt record lists nothing
+        self.index.jobs[smoke.JOB_A].files.append("output/report/README.md")  # duplicate counted once
+        self.assertEqual(len(self.index.job_files(smoke.JOB_A)), 3)
+
     def test_stale_files_by_modification_time(self):
         now = 2_000_000_000.0
         for entry in self.index.files.values():
