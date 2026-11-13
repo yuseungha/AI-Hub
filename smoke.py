@@ -19,6 +19,10 @@ from urllib.parse import quote
 PNG_1PX = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
 JOB_A, JOB_B, JOB_C = "20261010-100000-aaaa1111", "20261011-090000-bbbb2222", "20261012-080000-cccc3333"
+JOB_N = "20261013-070000-dddd4444"
+JOB_L = "20261014-060000-eeee5555"
+JOB_D = "20261015-050000-ffff6666"
+LONG_GOAL = "번호 프로젝트 폴더의 보고서와 도구를 한 번에 정리하고 결과를 확인하는 아주 긴 작업 목표 문장 " * 7
 CONTENT_TOKEN = "zebra-quokka-7731"
 
 
@@ -114,6 +118,348 @@ def make_export(path: Path):
     return path
 
 
+def make_numbered_fixture(root: Path, aliases=True):
+    """Workspace already split into numbered project folders; the job still lists old paths."""
+    job = root / "agent_lab" / "jobs" / JOB_N
+    write(job / "task.json", {"request": "보고서와 도구 정리", "goal": "",
+                              "files": ["output/report/README.md", "tool/main.py", "output/report/gone.txt"]})
+    write(job / "manifest.json", {"version": 2, "mode": "review", "implementer": "claude", "status": "completed",
+                                  "checks_passed": True, "review": {"passed": True}, "history": []})
+    if aliases:
+        write(root / "agent_lab" / "path-aliases.json", {"version": 1, "aliases": [
+            {"old": "output/report", "new": "01_Sample/output/report"}, {"old": "tool", "new": "01_Sample/tool"}]})
+    sample = root / "01_Sample"
+    write(sample / "output" / "report" / "README.md", "# 옮긴 보고서\n")
+    write(sample / "output" / "report" / "sub" / "deep.txt", "nested\n")
+    write(sample / "output" / "summary.md", "# 요약\n")
+    write(sample / "artifacts" / "pack" / "log.txt", "artifact log\n")
+    write(sample / "tool" / "main.py", "print('tool')\n")
+    write(sample / "tool" / ".venv" / "lib.py", "x = 1\n")
+    write(sample / "tmp" / "scratch.txt", "scratch\n")
+    write(sample / ".runtime" / "remote.txt", "not shown\n")
+    write(sample / "README.md", "# 샘플 프로젝트\n")
+    write(root / "02_Other" / "output" / "note.txt", "other\n")
+    write(root / "notes" / "free.txt", "unrelated root folder\n")
+    return root
+
+
+def check_numbered(app, work: Path, shots: Path):
+    from indexer import NO_GROUP, build_index, rel_key
+    from ui import CARD_ROLE, GROUP_NAME_ROLE, KEY_ROLE, MainWindow, Settings
+
+    root = make_numbered_fixture(work / "numbered")
+    before = tree_hash(root)
+    window = MainWindow(root, Settings(work / "numbered-profile" / "settings.json"))
+    window.resize(1440, 860)
+    window.show()
+    app.processEvents()
+    index = window.index
+    f = {}
+    f["numbered_projects"] = set(index.projects) == {
+        "01_Sample", "01_Sample/output", "01_Sample/output/report", "01_Sample/artifacts/pack", "01_Sample/tool",
+        "02_Other/output"} and {p.group for p in index.projects.values()} == {"01_Sample", "02_Other"}
+    keys = set(index.files)
+    f["numbered_scope"] = (not any("/tmp/" in k or ".runtime" in k or ".venv" in k or k.startswith("notes/") for k in keys)
+                           and sum(len(p.files) for p in index.projects.values()) == len(keys))
+    # One nav row per numbered folder (name without the number); its projects sit on the folder tab.
+    group = window.projects_node.child(0)
+    tree = window.folder_tree
+    names = [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())
+             if tree.topLevelItem(i).data(0, GROUP_NAME_ROLE) == "01_Sample"]
+    f["numbered_tree_groups"] = (group.text(0).startswith("Sample") and group.toolTip(0) == "01_Sample"
+                                 and group.childCount() == 0 and group.data(0, KEY_ROLE) == "group:01_Sample"
+                                 and [window.projects_node.child(i).data(0, KEY_ROLE)
+                                      for i in range(window.projects_node.childCount())]
+                                 == ["group:01_Sample", "group:02_Other"]
+                                 and any(name.startswith("output/report") for name in names)
+                                 and any(name.startswith("(직속 파일)") for name in names))
+    window.select_node("group:01_Sample")
+    app.processEvents()
+    cards = [window.job_list.item(i) for i in range(window.job_list.count())]
+    f["numbered_group_page"] = (window.page_title.text() == "Sample" and "작업 1건" in window.page_meta.text()
+                                and [tuple(item.data(256)) for item in cards] == [("day", "2026-10-13"), ("job", JOB_N)]
+                                and window.page_path == root / "01_Sample" and window.preview.kind == "group")
+    moved = index.files[rel_key("01_Sample/output/report/README.md")]
+    tool = index.files[rel_key("01_Sample/tool/main.py")]
+    f["alias_file_links"] = moved.jobs == [JOB_N] and tool.jobs == [JOB_N] and index.file_ais(moved) == {"claude"}
+    f["alias_job_size"] = index.job_size(JOB_N) == moved.size + tool.size
+    window.show_job(JOB_N)
+    app.processEvents()
+    text = window.preview.browser.toPlainText()
+    f["alias_job_detail"] = ("output/report/README.md" in text and "output/report/gone.txt (현재 없음)" in text
+                             and "output/report/README.md (현재 없음)" not in text)
+    window.grab().save(str(shots / "fixture-numbered.png"))
+    f["numbered_unchanged"] = tree_hash(root) == before  # browsing only; file operations follow
+
+    # Last direct file of 01_…/output (trash), of 01_… itself (move) and of a folder holding nothing
+    # else (02_Other/output, its group vanishes): the '(직속 파일)' node stays selected, also after F5.
+    trash_dir, dest = work / "numbered-trash", work / "numbered-dest"
+    trash_dir.mkdir()
+    dest.mkdir()
+    window.trash = lambda path: bool(path.replace(trash_dir / path.name)) or True
+    kept = []
+    for key, op, rel in (("01_Sample/output", "trash", "01_Sample/output/summary.md"),
+                         ("01_Sample", "move", "01_Sample/README.md"),
+                         ("02_Other/output", "trash", "02_Other/output/note.txt")):
+        window.select_node("project:" + key)
+        app.processEvents()
+        done = window.file_action(op, [window.index.files[rel_key(rel)]], dest if op == "move" else None,
+                                  confirm=False)
+        app.processEvents()
+
+        def still_selected():
+            return (window.current_key == "project:" + key
+                    and window.list.topLevelItemCount() == 0 and window.preview.kind == "project")
+        first = len(done.done) == 1 and not (root / rel).exists() and still_selected()
+        window.reload()
+        app.processEvents()
+        kept.append(first and still_selected())
+    f["numbered_direct_kept_selected"] = kept == [True, True, True]
+    window.close()
+
+    plain_root = make_numbered_fixture(work / "numbered-plain", aliases=False)
+    # A numbered folder with nothing indexed, one holding only scratch space, and a job whose
+    # one-line goal is far longer than the 90 characters the table keeps.
+    (plain_root / "03_Empty").mkdir()
+    write(plain_root / "04_OnlyScratch" / "tmp" / "scratch.txt", "scratch\n")
+    long_job = plain_root / "agent_lab" / "jobs" / JOB_L
+    write(long_job / "task.json", {"request": "정리", "goal": LONG_GOAL, "files": ["01_Sample/tool/main.py"]})
+    write(long_job / "manifest.json", {"version": 2, "implementer": "claude", "status": "completed", "history": []})
+    # A job whose only listed result (and its sub-folder) was deleted stays with its project folder.
+    gone_job = plain_root / "agent_lab" / "jobs" / JOB_D
+    write(gone_job / "task.json", {"request": "지운 결과", "goal": "", "files": ["02_Other/removed/gone.md"]})
+    write(gone_job / "manifest.json", {"version": 2, "implementer": "codex", "status": "completed", "history": []})
+    plain = MainWindow(plain_root, Settings(work / "numbered-plain-profile" / "settings.json"))
+    plain.resize(1440, 860)
+    plain.show()
+    app.processEvents()
+    nav = [plain.projects_node.child(i) for i in range(plain.projects_node.childCount())]
+    home = (list(plain.cards) == ["01_Sample", "02_Other", "03_Empty", "04_OnlyScratch", ""]
+            and "작업 1건 · 파일 0개" in plain.cards[""].text()
+            and [item.text(0) for item in nav[4:]] == ["작업 폴더 직속  (1)"]
+            and all("수정 필요 0건" in card.text() for card in plain.cards.values())
+            and "작업 0건 · 파일 0개" in plain.cards["03_Empty"].text()
+            and "작업 기록 없음" in plain.cards["03_Empty"].text())
+    plain.select_node("group:03_Empty")
+    app.processEvents()
+    empty_jobs = [tuple(plain.job_list.item(i).data(256)) for i in range(plain.job_list.count())]
+    plain.tabs.setCurrentIndex(2)
+    app.processEvents()
+    f["empty_numbered_folders_listed"] = (
+        home and [item.text(0) for item in nav[:4]] == ["Sample  (1)", "Other  (1)", "Empty  (0)", "OnlyScratch  (0)"]
+        and plain.page_title.text() == "Empty" and empty_jobs == [("empty", None)]
+        and plain.page_path == plain_root / "03_Empty" and plain.list.topLevelItemCount() == 0
+        and plain.current_key == "group:03_Empty" and plain.preview.kind == "group")
+    plain.select_node("group:01_Sample")
+    plain.tabs.setCurrentIndex(0)
+    app.processEvents()
+    rows = {plain.job_list.item(i).data(256)[1]: i for i in range(plain.job_list.count())}
+    long_item = plain.job_list.item(rows[JOB_L])
+    delegate = plain.job_list.itemDelegate()
+    width = delegate.title_width()
+    metrics = plain.job_list.fontMetrics()
+    # Title longer than two lines: every wrapped line is drawn in full (no elision), the row grows
+    # by one line each, and the rendered card has text pixels on every one of those lines.
+    lines = delegate.title_lines(plain.job_list.font(), long_item.text())
+    rect = plain.job_list.visualItemRect(long_item)
+    shot = plain.job_list.viewport().grab().toImage()
+    ratio = shot.devicePixelRatio()
+    top = rect.top() + 3 + delegate.PAD
+
+    def inked(row):  # dark title pixels in the band of one text line
+        y0, y1 = top + row * metrics.lineSpacing(), top + (row + 1) * metrics.lineSpacing()
+        return sum(1 for y in range(int(y0 * ratio), int(y1 * ratio))
+                   for x in range(int((rect.left() + delegate.PAD) * ratio), int((rect.left() + delegate.PAD + width) * ratio), 2)
+                   if shot.pixelColor(x, y).lightness() < 120)
+    f["long_title_fully_shown"] = (
+        long_item.text() == LONG_GOAL.strip() and len(long_item.text()) > 90 and len(lines) >= 3
+        and "".join(lines).replace(" ", "") == LONG_GOAL.replace(" ", "")
+        and not any("…" in line or "..." in line for line in lines)
+        and all(metrics.horizontalAdvance(line) <= width for line in lines)
+        and rect.height() == plain.job_list.sizeHintForRow(rows[JOB_L])
+        == 6 + 2 * delegate.PAD + len(lines) * metrics.lineSpacing() + delegate.GAP + delegate.PILL
+        and all(inked(row) > 20 for row in range(len(lines)))
+        and plain.job_list.viewport().rect().contains(rect)
+        and JOB_N not in rows  # without the alias table the old-path job is not in this project
+        and LONG_GOAL.strip() in long_item.toolTip()
+        and len(plain.index.jobs[JOB_L].title) == 90)  # the table keeps the short form
+    f["long_title_lines"] = len(lines)
+    plain.grab().save(str(shots / "fixture-long-title.png"))
+    plain.select_node("group:02_Other")
+    app.processEvents()
+    kept = [tuple(plain.job_list.item(i).data(256)) for i in range(plain.job_list.count())]
+    plain.select_node("history")
+    app.processEvents()
+    metas = {plain.job_list.item(i).data(256)[1]: (plain.job_list.item(i).data(CARD_ROLE) or {}).get("meta", "")
+             for i in range(plain.job_list.count())}
+    f["deleted_path_job_kept_in_project"] = (
+        kept == [("day", "2026-10-15"), ("job", JOB_D)] and not (plain_root / "02_Other" / "removed").exists()
+        and "작업 1건" in plain.cards["02_Other"].text() and metas[JOB_D].endswith("· Other")
+        and metas[JOB_L].endswith("· Sample") and metas[JOB_N].endswith("· 작업 폴더 직속")
+        and "group:" + NO_GROUP not in plain.nodes)
+
+    # Card details are wrapped, never elided: long AI roles push the file count and the project
+    # onto further lines, and a narrow card does the same; every line is really drawn.
+    from PySide6.QtGui import QFontMetrics
+    from PySide6.QtWidgets import QSplitter
+    font = plain.job_list.font()
+    small = QFontMetrics(delegate.small_font(font))
+
+    def card_state(item):
+        info = item.data(CARD_ROLE)
+        lines = delegate.meta_lines(font, info)
+        rect = plain.job_list.visualItemRect(item)
+        titles = len(delegate.title_lines(font, item.text()))
+        expected = (6 + 2 * delegate.PAD + titles * metrics.lineSpacing() + delegate.GAP + delegate.PILL
+                    + (len(lines) - 1) * small.lineSpacing())
+        shot = plain.job_list.viewport().grab().toImage()
+        ratio = shot.devicePixelRatio()
+        pill_top = rect.top() + 3 + delegate.PAD + titles * metrics.lineSpacing() + delegate.GAP
+        last_top = pill_top + delegate.PILL + (len(lines) - 2) * small.lineSpacing() if len(lines) > 1 else pill_top
+        last_height = small.lineSpacing() if len(lines) > 1 else delegate.PILL
+        skip = delegate.pill_width(font, info) + 8 if len(lines) == 1 else 0
+        ink = sum(1 for y in range(int(last_top * ratio), int((last_top + last_height) * ratio))
+                  for x in range(int((rect.left() + delegate.PAD + skip) * ratio), int(rect.right() * ratio), 2)
+                  if shot.pixelColor(x, y).lightness() < 170)
+        whole = "".join(lines).replace(" ", "") == info["meta"].replace(" ", "")
+        fits = all(small.horizontalAdvance(line) <= delegate.title_width() for line in lines)
+        # Rows are laid out again for the current width: each row has its own height and none overlaps.
+        rects = [plain.job_list.visualItemRect(plain.job_list.item(i)) for i in range(plain.job_list.count())]
+        apart = (all(a.bottom() < b.top() for a, b in zip(rects, rects[1:]))
+                 and all(r.height() == plain.job_list.sizeHintForRow(i) for i, r in enumerate(rects)))
+        return {"lines": lines, "ok": (whole and fits and not any("…" in line for line in lines)
+                                       and rect.height() == expected and ink > 10 and apart
+                                       and plain.job_list.viewport().rect().contains(rect))}
+
+    item_d = next(plain.job_list.item(i) for i in range(plain.job_list.count())
+                  if plain.job_list.item(i).data(256) == ("job", JOB_D))
+    wide = card_state(item_d)
+    long_roles = "Codex 구현, 조사, 계획, 검토 · Claude 구현, 조사, 계획, 검토 · " * 5 + "파일 12개 · Other"
+    item_d.setData(CARD_ROLE, dict(item_d.data(CARD_ROLE), meta=long_roles))
+    app.processEvents()
+    roles = card_state(item_d)
+    # Narrow centre column with an ordinary two-AI job tied to two projects.
+    usual = "Claude 구현, 조사 · Codex 계획, 검토 · 파일 12개 · LectureStudy, Other"
+    item_d.setData(CARD_ROLE, dict(item_d.data(CARD_ROLE), meta=usual))
+    app.processEvents()
+    usual_wide = card_state(item_d)
+    plain.centralWidget().findChild(QSplitter).setSizes([190, 250, 1000])  # squeeze the centre column
+    app.processEvents()
+    narrow_width = delegate.title_width()
+    narrow = card_state(item_d)
+    f["card_details_never_hidden"] = (
+        wide["ok"] and len(wide["lines"]) == 1 and wide["lines"][0].endswith("파일 0개 · Other")
+        and roles["ok"] and len(roles["lines"]) >= 2 and roles["lines"][-1].endswith("파일 12개 · Other")
+        and usual_wide["ok"] and len(usual_wide["lines"]) == 1
+        and narrow_width < 340 and narrow["ok"] and len(narrow["lines"]) >= 2
+        and "".join(narrow["lines"]).replace(" ", "").endswith("파일12개·LectureStudy,Other"))
+    f["card_detail_lines"] = [len(wide["lines"]), len(roles["lines"]), len(narrow["lines"]), narrow_width]
+    plain.grab().save(str(shots / "fixture-narrow-cards.png"))
+
+    # Home cards: as many columns as show every line of every card whole; a longer line or a
+    # narrower page means fewer columns, never a clipped card.
+    def cards_fit():
+        return all(max(card.fontMetrics().horizontalAdvance(line) for line in card.text().splitlines()) + 30
+                   <= card.width() for card in plain.cards.values())
+    plain.centralWidget().findChild(QSplitter).setSizes([210, 780, 426])
+    plain.select_node("overview")
+    app.processEvents()
+    lines = plain.cards["01_Sample"].text().splitlines()
+    wide = (plain.card_columns, cards_fit(), plain.cards_area.height())
+    plain.cards["02_Other"].setText("Other" + chr(10) + "작업 123,456건 · 파일 1,234,567개 · 아주 긴 요약 줄"
+                                    + chr(10) + "최근 작업 2026-10-15" + chr(10) + "수정 필요 0건")
+    plain.layout_cards()
+    app.processEvents()
+    longer = (plain.card_columns, cards_fit(), plain.cards_area.height())
+    plain.centralWidget().findChild(QSplitter).setSizes([190, 250, 1000])
+    app.processEvents()
+    narrow = (plain.card_columns, cards_fit())
+    plain.grab().save(str(shots / "fixture-narrow-home.png"))
+    f["home_cards_fit_any_width"] = (
+        wide == (3, True, 2 * 102) and longer[:2] == (2, True) and longer[2] == 3 * 102
+        and narrow[1] and narrow[0] <= longer[0]
+        and lines == ["Sample", "작업 1건 · 파일 6개", "최근 작업 2026-10-14", "수정 필요 0건"]
+        and plain.cards_grid.count() == len(plain.cards) == 5)
+    f["home_card_columns"] = [wide[0], longer[0], narrow[0]]
+    # Numbered folders without the alias table: reported under 파일 정리 → 점검 필요, and the
+    # old-path job is not linked to the file at its new place.
+    plain.select_node("problems")
+    app.processEvents()
+    f["missing_aliases_reported"] = (plain.preview.title.text() == "점검 필요"
+                                     and "path-aliases.json 없음" in plain.preview.browser.toPlainText()
+                                     and plain.index.files[rel_key("01_Sample/output/report/README.md")].jobs == []
+                                     and plain.current_key == "problems" and plain.page_title.text() == "점검 필요"
+                                     and plain.nodes["problems"].parent() is plain.nodes["cleanup"]
+                                     and plain.stack.currentWidget() is plain.files_box
+                                     and plain.list.topLevelItemCount() == 0)
+    plain.close()
+    broken = make_numbered_fixture(work / "numbered-broken", aliases=False)
+    write(broken / "agent_lab" / "path-aliases.json", "{ broken")
+    damaged = build_index(broken)
+    f["bad_aliases_reported"] = (any("path-aliases.json 손상" in text for text in damaged.problems)
+                                 and damaged.files[rel_key("01_Sample/output/report/README.md")].jobs == [])
+    return f
+
+
+# Real keyboard, IME and mouse-button messages: WM_KEYDOWN … WM_UNICHAR, IME composition and
+# char, WM_LBUTTONDOWN … WM_MOUSEHWHEEL. WM_MOUSEMOVE (0x0200) passes for the hover check.
+BLOCKED_MESSAGES = frozenset({*range(0x0100, 0x010A), 0x010D, 0x010E, 0x010F, 0x0286, *range(0x0201, 0x020F)})
+
+
+def install_input_guard(app):
+    """Native Windows run: drop real keyboard, IME and mouse-button input. The test window takes
+    the focus, so a user typing or clicking meanwhile would change the state under test (a stray
+    key once filtered the list). QTest key events skip the native layer and real cursor moves are
+    kept, so the checks themselves are unaffected."""
+    if sys.platform != "win32" or app.platformName() != "windows":
+        return None
+    from ctypes import wintypes
+    from PySide6.QtCore import QAbstractNativeEventFilter
+
+    class InputGuard(QAbstractNativeEventFilter):
+        def nativeEventFilter(self, event_type, message):
+            name = event_type.data() if hasattr(event_type, "data") else bytes(event_type)
+            if name.startswith(b"windows") and wintypes.MSG.from_address(int(message)).message in BLOCKED_MESSAGES:
+                return True, 0
+            return False, 0
+
+    guard = InputGuard()
+    app.installNativeEventFilter(guard)
+    return guard
+
+
+def stray_input_blocked(window):
+    """Post a real 'm' key press to the native window while the search box has focus."""
+    import ctypes
+    from ctypes import wintypes
+    from PySide6.QtTest import QTest
+
+    post = ctypes.windll.user32.PostMessageW
+    post.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    window.search.setFocus()
+    hwnd = int(window.winId())
+    for message, value, flags in ((0x0100, 0x4D, 0x00320001), (0x0102, ord("m"), 0x00320001),
+                                  (0x0101, 0x4D, 0xC0320001)):  # WM_KEYDOWN, WM_CHAR, WM_KEYUP
+        post(hwnd, message, value, flags)
+    QTest.qWait(150)
+    text = window.search.text()
+    window.search.clear()
+    return text == ""
+
+
+def hover_at(widget, pos):
+    """Mouse move sent to the top-level window, which routes it to the widget under pos and raises
+    the enter/hover events like platform input, without moving the user's real cursor."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    top = widget.window()
+    event = QMouseEvent(QEvent.Type.MouseMove, QPointF(widget.mapTo(top, pos)), QPointF(widget.mapToGlobal(pos)),
+                        Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(top.windowHandle(), event)
+
+
 def tree_hash(root: Path):
     digest = {}
     for path in sorted(root.rglob("*")):
@@ -154,6 +500,8 @@ def check_fixture(app, work: Path, shots: Path):
     app.processEvents()
     index = window.index
     f = {}
+    if app.platformName() == "windows":
+        f["native_input_blocked"] = stray_input_blocked(window)
     f["jobs_indexed"] = sorted(index.jobs) == [JOB_A, JOB_B, JOB_C]
     f["non_job_folder_skipped"] = "not-a-job-smoke" not in index.jobs
     f["roles_codex_writer"] = index.jobs[JOB_A].roles() == {"codex": ["구현"], "claude": ["계획", "검토"]}
@@ -183,6 +531,7 @@ def check_fixture(app, work: Path, shots: Path):
         "overview", "ai:codex", "ai:claude", "ai:chatgpt", "ai:unknown", "project:output/report", "project:output",
         "folder:output/report|sub",
         "day:2026-10-11", "unclassified", "problems", "stale:90", "stale:180", "stale:365", "stale:90:unlinked"))
+    f.update(check_layout(app, window, root, shots))
     window.select_node("ai:claude")
     app.processEvents()
     f["ai_filter_list"] = {tuple(item.data(0, 256)) for item in list_rows(window)} == {("job", JOB_A), ("job", JOB_B)}
@@ -251,6 +600,152 @@ def check_fixture(app, work: Path, shots: Path):
     f["workspace_unchanged"] = tree_hash(root) == before  # browsing only; file operations follow
     f.update(check_file_ops(app, window, root, work, shots))
     window.close()
+    return f
+
+
+def job_cards(window):
+    return [window.job_list.item(row) for row in range(window.job_list.count())]
+
+
+def check_layout(app, window, root: Path, shots: Path):
+    """Project-centred layout: nav rows, home cards, project tabs, job cards and the job detail order."""
+    from indexer import NO_GROUP, rel_key
+    from ui import CARD_ROLE, KEY_ROLE, TABS
+
+    f = {}
+    nav = window.tree
+    top = [nav.topLevelItem(i) for i in range(nav.topLevelItemCount())]
+    f["nav_sections"] = ([item.text(0).split("  (")[0] for item in top] == ["홈", "전체 작업 이력", "파일 정리", "프로젝트"]
+                         and [top[3].child(i).data(0, KEY_ROLE) for i in range(top[3].childCount())]
+                         == ["group:", "group:" + NO_GROUP]
+                         and top[3].child(0).text(0) == "작업 폴더 직속  (2)"
+                         and top[3].child(1).text(0) == "프로젝트 미지정  (1)"
+                         and window.nodes["ai:claude"].parent() is top[1]
+                         and window.nodes["unclassified"].parent() is top[2]
+                         and window.nodes["problems"].parent() is top[2]
+                         and all(window.nodes[key].treeWidget() is window.folder_tree
+                                 for key in ("project:output/report", "folder:output/report|sub")))
+
+    # Home: one card per project group and the recent jobs as cards with their project name.
+    f["home_page"] = (window.current_key == "overview" and window.page_title.text() == "홈"
+                      and window.stack.currentWidget() is window.job_list and window.cards_area.isVisible()
+                      and not window.tabs.isVisible() and list(window.cards) == [""]
+                      and "작업 2건" in window.cards[""].text() and "수정 필요 1건" in window.cards[""].text()
+                      and [tuple(item.data(256)) for item in job_cards(window)]
+                      == [("day", "2026-10-12"), ("job", JOB_C), ("day", "2026-10-11"), ("job", JOB_B),
+                          ("day", "2026-10-10"), ("job", JOB_A)])
+    window.grab().save(str(shots / "fixture-home.png"))
+    window.cards[""].click()
+    app.processEvents()
+
+    # Project page, jobs tab: this project's jobs by date, newest first; full titles on cards.
+    cards = job_cards(window)
+    info = {item.data(256)[1]: item.data(CARD_ROLE) for item in cards if item.data(256)[0] == "job"}
+    f["group_jobs_tab"] = (window.current_key == "group:" and window.tabs.isVisible()
+                           and [window.tabs.tabText(i) for i in range(3)] == ["작업 2", "결과물 8", "폴더"]
+                           and window.tabs.currentIndex() == 0 and window.stack.currentWidget() is window.job_list
+                           and not window.cards_area.isVisible() and window.preview.kind == "group"
+                           and [item.data(256)[1] for item in cards] == ["2026-10-11", JOB_B, "2026-10-10", JOB_A]
+                           and cards[3].text() == "보고서 페이지 작성"
+                           and info[JOB_A] == {"status": "완료 · 검토 통과", "group": "done",
+                                               "meta": "Codex 구현 · Claude 계획, 검토 · 파일 3개"}
+                           and info[JOB_B]["group"] == "repair" and "파일 2개" in info[JOB_B]["meta"]
+                           and window.page_path == root and "작업 2건 · 파일 10개" in window.page_meta.text())
+    # A long title wraps onto a second line instead of being cut to a column width.
+    delegate = window.job_list.itemDelegate()
+    short = window.job_list.sizeHintForRow(3)
+    cards[3].setText("보고서 페이지 작성 " * 20)
+    app.processEvents()
+    f["job_card_two_lines"] = window.job_list.sizeHintForRow(3) > short and delegate is not None
+    cards[3].setText("보고서 페이지 작성")
+    window.job_list.setCurrentItem(cards[3])
+    app.processEvents()
+
+    # Job detail: request, then result files, then checks/review with the phase summary; logs folded.
+    text = window.preview.browser.toPlainText()
+    order = [text.find(mark) for mark in ("요청 원문", "결과 파일", "검사와 검토", "단계별 로그 보기", "목표")]
+    f["job_detail_order"] = (window.preview.kind == "job" and -1 not in order and order == sorted(order)
+                             and "계획 Claude (opus)" in text and "검토 Claude (sonnet)" in text
+                             and "검사 1회" in text and "response.md" not in text
+                             and "작업 폴더 직속" in window.preview.meta.text())
+    window.open_link("hub:toggle/phases")
+    app.processEvents()
+    opened = window.preview.browser.toPlainText()
+    window.open_link("hub:toggle/phases")
+    app.processEvents()
+    f["job_phase_logs_toggle"] = ("response.md" in opened and "단계별 로그 접기" in opened
+                                  and "response.md" not in window.preview.browser.toPlainText())
+    # Logs opened for one job are folded again when another job is shown, and when coming back.
+    window.open_link("hub:toggle/phases")
+    window.job_list.setCurrentItem(cards[1])  # job B
+    app.processEvents()
+    other = window.preview.browser.toPlainText()
+    window.job_list.setCurrentItem(cards[3])  # back to job A
+    app.processEvents()
+    back = window.preview.browser.toPlainText()
+    f["job_phase_logs_folded_per_job"] = (
+        window.preview.title.text() == "보고서 페이지 작성" and "차트 도구 수정" not in back
+        and all("단계별 로그 보기" in text and "단계별 로그 접기" not in text for text in (other, back))
+        and "checks.json" not in other and "review.model.json" not in other and "response.md" not in back)
+    window.grab().save(str(shots / "fixture-group.png"))
+
+    # Results tab: files worth opening only; folder tab: the old project tree and file table.
+    window.tabs.setCurrentIndex(TABS.index("results"))
+    app.processEvents()
+    f["group_results_tab"] = (window.stack.currentWidget() is window.files_box and not window.folder_tree.isVisible()
+                              and {tuple(item.data(0, 256)) for item in list_rows(window)}
+                              == {("file", rel_key(path)) for path in (
+                                  "output/report/README.md", "output/report/chart.png",
+                                  "output/report/gpt-revision-prompt.md", "output/summary.md", "artifacts/top.png",
+                                  "output/report/notes.txt", "output/report/sub/deep.txt", "artifacts/pack/log.txt")}
+                              and window.current_key == "group:")
+    window.reload()
+    app.processEvents()
+    f["group_tab_kept_on_reload"] = (window.current_key == "group:" and window.tabs.currentIndex() == 1
+                                     and window.list.topLevelItemCount() == 8)
+    window.tabs.setCurrentIndex(TABS.index("folders"))
+    app.processEvents()
+    tree = window.folder_tree
+    f["group_folders_tab"] = (tree.isVisible() and window.stack.currentWidget() is window.files_box
+                              and [tree.topLevelItem(i).text(0).split("  (")[0] for i in range(tree.topLevelItemCount())]
+                              == ["output (직속 파일)", "output/report", "artifacts (직속 파일)", "artifacts/pack", "tool"]
+                              and window.current_key == "project:output" and window.preview.kind == "project"
+                              and nav.currentItem() is window.nodes["group:"])
+
+    # Jobs tied to no project folder, and the whole history with project names.
+    window.select_node("group:" + NO_GROUP)
+    app.processEvents()
+    f["no_project_jobs"] = ([tuple(item.data(256)) for item in job_cards(window)] == [("day", "2026-10-12"), ("job", JOB_C)]
+                            and window.page_title.text() == "프로젝트 미지정" and window.page_path is None
+                            and not window.page_folder_button.isVisible()
+                            and [window.tabs.isTabVisible(i) for i in range(3)] == [True, False, False])
+    window.select_node("history")
+    app.processEvents()
+    metas = {item.data(256)[1]: item.data(CARD_ROLE)["meta"] for item in job_cards(window) if item.data(256)[0] == "job"}
+    f["history_page"] = (window.page_title.text() == "전체 작업 이력" and set(metas) == {JOB_A, JOB_B, JOB_C}
+                         and metas[JOB_A].endswith("· 작업 폴더 직속") and "작업 폴더 직속" not in metas[JOB_C]
+                         and metas[JOB_C].endswith("· 프로젝트 미지정")
+                         and window.preview.kind == "history" and window.stack.currentWidget() is window.job_list)
+    window.select_node("cleanup")
+    app.processEvents()
+    f["cleanup_page"] = (window.page_title.text() == "파일 정리" and window.preview.kind == "cleanup"
+                         and window.stack.currentWidget() is window.files_box
+                         and "미분류 파일" in window.preview.browser.toPlainText())
+
+    # Search shows the table over any page and clearing it returns to the page.
+    window.select_node("group:")
+    window.tabs.setCurrentIndex(0)
+    window.search.setText("차트")
+    app.processEvents()
+    searching = (window.page_title.text() == "검색 결과" and not window.tabs.isVisible()
+                 and window.stack.currentWidget() is window.files_box
+                 and ("job", JOB_B) in {tuple(item.data(0, 256)) for item in list_rows(window)})
+    window.search.clear()
+    app.processEvents()
+    f["search_returns_to_page"] = (searching and window.page_title.text() == "작업 폴더 직속" and window.tabs.isVisible()
+                                   and window.stack.currentWidget() is window.job_list)
+    window.select_node("overview")
+    app.processEvents()
     return f
 
 
@@ -355,21 +850,25 @@ def check_file_ops(app, window, root: Path, work: Path, shots: Path):
     row_b = window.list.visualItemRect(rows[("job", JOB_B)])
     window.list.setCurrentItem(rows[("job", JOB_B)])  # selected row, cursor elsewhere
     app.processEvents()
-    window.raise_()
-    window.activateWindow()
-    # Native Windows delivers the real cursor move through the event loop, so wait briefly.
-    QTest.mouseMove(viewport, row.center())  # hover job A's green row
-    QTest.qWait(150)
-    hover_shot = viewport.grab().toImage()
-    hovered = pixel(hover_shot, row.left() + 3, row.center().y())
-    selected = pixel(hover_shot, row_b.left() + 3, row_b.center().y())
-    QTest.mouseMove(viewport, row_b.center())  # leave job A
-    QTest.qWait(150)
-    after = pixel(viewport.grab().toImage(), row.left() + 3, row.center().y())
-    f["hover_row_white"] = (close(hovered, "#FFFFFF", 3) and close(selected, "#D9D5FA", 6)
-                            and close(after, STATUS_COLORS["done"], 4)
-                            and close(pixel(hover_shot, header.sectionViewportPosition(0) + header.sectionSize(0) - 1,
-                                            row.center().y()), SEPARATOR_COLOR))
+    # The move goes through the window, not the real cursor: on native Windows another app in front
+    # (the test window cannot take the foreground while the user works elsewhere) would catch a real
+    # cursor move. A user's own mouse moving over the window meanwhile can still spoil an attempt.
+    for attempt in range(1, 4):
+        hover_at(viewport, row.center())  # hover job A's green row
+        QTest.qWait(150)
+        hover_shot = viewport.grab().toImage()
+        hovered = pixel(hover_shot, row.left() + 3, row.center().y())
+        selected = pixel(hover_shot, row_b.left() + 3, row_b.center().y())
+        hover_at(viewport, row_b.center())  # leave job A
+        QTest.qWait(150)
+        after = pixel(viewport.grab().toImage(), row.left() + 3, row.center().y())
+        f["hover_row_white"] = (close(hovered, "#FFFFFF", 3) and close(selected, "#D9D5FA", 6)
+                                and close(after, STATUS_COLORS["done"], 4)
+                                and close(pixel(hover_shot, header.sectionViewportPosition(0) + header.sectionSize(0) - 1,
+                                                row.center().y()), SEPARATOR_COLOR))
+        f["hover_attempts"] = attempt
+        if f["hover_row_white"]:
+            break
     window.list.clearSelection()
     window.list.setCurrentItem(None)
     f["column_separators"] = (all(marks) and all(ends) and all(inside) and no_horizontal
@@ -429,7 +928,7 @@ def check_file_ops(app, window, root: Path, work: Path, shots: Path):
     second = window.file_action("copy", [window.index.files[notes]], pack, confirm=False)
     f["copy_no_overwrite"] = (len(first.done) == 1 and len(second.done) == 1 and (report / "notes.txt").exists()
                               and (pack / "notes.txt").exists() and (pack / "notes (2).txt").exists())
-    f["selection_kept_after_op"] = window.tree.currentItem().data(0, KEY_ROLE) == "project:output/report"
+    f["selection_kept_after_op"] = window.current_key == "project:output/report"
 
     # Right-click menu is the only path: its actions reach the pick-folder and confirm steps,
     # while the former shortcuts (Ctrl+Shift+C/M, Delete) do nothing.
@@ -478,7 +977,7 @@ def check_file_ops(app, window, root: Path, work: Path, shots: Path):
     app.processEvents()
     emptied = window.file_action("trash", [window.index.files[rel_key("output/report/sub/deep.txt")]], confirm=False)
     f["emptied_folder_kept_selected"] = (len(emptied.done) == 1 and (report / "sub").is_dir()
-                                         and window.tree.currentItem().data(0, KEY_ROLE) == "folder:output/report|sub"
+                                         and window.current_key == "folder:output/report|sub"
                                          and window.list.topLevelItemCount() == 0)
     window.trash = lambda path: False
     refused = window.file_action("trash", [window.index.files[rel_key("output/summary.md")]], confirm=False)
@@ -493,7 +992,7 @@ def check_file_ops(app, window, root: Path, work: Path, shots: Path):
         done = window.file_action(op, [window.index.files[rel_key(f"{area}/{name}")]], dest, confirm=False)
         app.processEvents()
         kept.append(len(done.done) == 1 and not (root / area / name).exists()
-                    and window.tree.currentItem().data(0, KEY_ROLE) == "project:" + area
+                    and window.current_key == "project:" + area
                     and window.list.topLevelItemCount() == 0 and window.preview.kind == "project")
     f["emptied_area_kept_selected"] = kept == [True, True]
 
@@ -515,11 +1014,11 @@ def check_file_ops(app, window, root: Path, work: Path, shots: Path):
         done = other.file_action(op, [other.index.files[rel_key(f"{area}/{name}")]],
                                  bare_dest if op == "move" else None, confirm=False)
         app.processEvents()
-        selected = other.tree.currentItem().data(0, KEY_ROLE) == "project:" + area
+        selected = other.current_key == "project:" + area
         first = len(done.done) == 1 and selected and other.list.topLevelItemCount() == 0
         other.reload()
         app.processEvents()
-        bare_ok.append(first and other.tree.currentItem().data(0, KEY_ROLE) == "project:" + area
+        bare_ok.append(first and other.current_key == "project:" + area
                        and other.preview.kind == "project")
     other.close()
     f["bare_area_kept_selected"] = bare_ok == [True, True]
@@ -559,8 +1058,24 @@ def check_real(app, root: Path, shots: Path, ignore: Path):
             window.show_job(jobs[0].id)
             app.processEvents()
             window.grab().save(str(shots / "real-job.png"))
+        cards = len(window.cards)
+        busiest = max(index.groups(), key=lambda group: len(index.group_jobs(group)), default=None)
+        if busiest is not None:
+            window.select_node("group:" + busiest)
+            app.processEvents()
+            window.grab().save(str(shots / "real-project.png"))
         window.close()
+    # Expected groups worked out without the indexer: every 'digits_' folder holding any file.
+    numbered = sorted(child.name for child in root.iterdir()
+                      if child.is_dir() and child.name.split("_", 1)[0].isdigit() and "_" in child.name
+                      and any(path.is_file() for path in child.rglob("*")))
+    groups = sorted({p.group for p in index.projects.values() if p.group})
+    linked = [entry for entry in index.files.values() if entry.jobs and entry.project.split("/", 1)[0] in numbered]
     return {"real_jobs": len(index.jobs), "real_projects": len(index.projects), "real_files": len(index.files),
+            "real_numbered_group_names": groups,
+            "real_numbered_groups": groups == numbered,
+            "real_project_cards": cards == len(index.groups()) and cards >= len(numbered),
+            "real_alias_links": bool(linked) or not index.aliases,
             "real_load_seconds": seconds,
             "real_loaded": bool(index.jobs) and bool(index.projects),
             "real_unchanged": stat_snapshot(build_index(root), ignore) == snapshot}
@@ -577,10 +1092,12 @@ def run(report: Path, real_root: Path | None = None):
     data = {"passed": False, "packaged": bool(getattr(sys, "frozen", False))}
     try:
         app = QApplication.instance() or QApplication([])
+        guard = install_input_guard(app)  # noqa: F841  kept alive for the whole run
         configure_fonts()
         app.setWindowIcon(make_icon())
         with tempfile.TemporaryDirectory() as work:
             flags = check_fixture(app, Path(work), shots)
+            flags.update(check_numbered(app, Path(work), shots))
         data.update(flags)
         if real_root is not None:
             data.update(check_real(app, real_root.resolve(), shots, report.parent))

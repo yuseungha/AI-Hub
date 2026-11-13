@@ -7,7 +7,11 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent
-WORKSPACE = ROOT.parent
+sys.path.insert(0, str(ROOT))
+from indexer import find_root  # noqa: E402
+
+# The app may sit directly in the workspace or inside a numbered project folder (03_AI-Hub/ai-hub).
+WORKSPACE = find_root(ROOT.parent) or ROOT.parent
 SOURCES = ("app.py", "ui.py", "indexer.py", "preview.py", "chatgpt.py", "fileops.py", "smoke.py", "build.py")
 
 

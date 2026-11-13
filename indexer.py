@@ -26,8 +26,40 @@ EXCLUDED_DIRS = {"node_modules", ".venv", "venv", ".git", "__pycache__", ".build
 SCAN_AREAS = ("output", "artifacts")
 MAX_FILES_PER_PROJECT = 3000
 SKIPPED_TOP = {"tmp", ".runtime"}  # scratch space, not results
+PROJECT_FOLDER = re.compile(r"^\d+_")  # numbered project folders, e.g. 01_Dayline
+ALIASES_FILE = ("agent_lab", "path-aliases.json")  # old → new locations after folders were moved
 PROJECT_EXCLUDES = {"agent_lab": {"jobs"}}  # jobs are indexed as Job records
 PROMPT_SUFFIXES = {".md", ".txt"}
+NO_GROUP = "~none"  # pseudo group: jobs whose files sit in no indexed project
+ROOT_GROUP_LABEL, NO_GROUP_LABEL = "작업 폴더 직속", "프로젝트 미지정"
+# Results worth opening: documents, runnable builds, archives, images and video.
+DELIVERABLE_SUFFIXES = {".md", ".txt", ".pdf", ".docx", ".pptx", ".xlsx", ".hwp", ".hwpx", ".html", ".htm", ".csv",
+                        ".exe", ".apk", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".mp4"}
+# Folders holding checks, logs and backups rather than results.
+SUPPORT_DIRS = {"verification", "tests", "test", "checks", "check", "history", "records", "record",
+                "logs", "log", "backups", "backup", "tmp"}
+
+
+def is_root_path(first):
+    """Whether the first segment of a recorded path (normalized) is workspace-root work: output/,
+    artifacts/, a root folder or a root file, even one deleted since. Numbered project folders,
+    scratch and excluded folders and paths leaving the workspace are not."""
+    return (bool(first) and first != ".." and ":" not in first and first not in EXCLUDED_DIRS | SKIPPED_TOP
+            and not PROJECT_FOLDER.match(first))
+
+
+def group_label(group):
+    """Display name of a project group: '01_Dayline' → 'Dayline'."""
+    if group == NO_GROUP:
+        return NO_GROUP_LABEL
+    return PROJECT_FOLDER.sub("", group, count=1) or group if group else ROOT_GROUP_LABEL
+
+
+def is_deliverable(entry):
+    """Whether a file is a result to open (by type), outside check/log/backup folders."""
+    folders = [part.lower() for part in entry.rel.split("/")[:-1]]
+    return (entry.path.suffix.lower() in DELIVERABLE_SUFFIXES
+            and not any(part in SUPPORT_DIRS or part.endswith("-shots") for part in folders))
 
 
 @dataclass
@@ -64,9 +96,14 @@ class Job:
     problems: list[str] = field(default_factory=list)
 
     @property
-    def title(self):
+    def full_title(self):
+        """First line of the goal (or request), uncut; job cards wrap it themselves."""
         text = (self.goal or self.request or self.id).strip()
-        first = text.splitlines()[0] if text else self.id
+        return text.splitlines()[0].strip() if text else self.id
+
+    @property
+    def title(self):
+        first = self.full_title
         return first if len(first) <= 90 else first[:89] + "…"
 
     def roles(self):
@@ -114,6 +151,7 @@ class Project:
     jobs: list[str] = field(default_factory=list)
     truncated: bool = False
     recursive: bool = True  # False: files sitting directly in output/ or artifacts/
+    group: str = ""  # numbered project folder holding this project ('' at the workspace root)
 
     def owns(self, key):
         """Whether a normalized relative path belongs to this project."""
@@ -128,6 +166,13 @@ class Index:
     projects: dict[str, Project]
     files: dict[str, FileEntry]
     problems: list[str]
+    aliases: list[tuple[str, str]] = field(default_factory=list)
+    folders: list[str] = field(default_factory=list)  # every numbered project folder, indexed files or not
+    root_listed: bool = False  # some job lists a workspace-root path (output/, artifacts/, root folder or file)
+
+    def resolve(self, item):
+        """Normalized key of a path from a job record, following moved-folder aliases."""
+        return resolve_key(item, self.aliases)
 
     def file_ais(self, entry: FileEntry):
         found = set()
@@ -157,11 +202,60 @@ class Index:
 
     def job_files(self, job_id):
         """Indexed result files listed in the job's task.json (files that still exist)."""
-        keys = dict.fromkeys(rel_key(item) for item in self.jobs[job_id].files)  # ordered, no duplicates
+        keys = dict.fromkeys(self.resolve(item) for item in self.jobs[job_id].files)  # ordered, no duplicates
         return [self.files[key] for key in keys if key in self.files]
 
     def job_size(self, job_id):
         return sum(entry.size for entry in self.job_files(job_id))
+
+    def groups(self):
+        """Projects by group: numbered project folders in name order, then the workspace root ('')."""
+        found = {name: [] for name in self.folders}  # a numbered folder with nothing indexed is still listed
+        if self.root_listed:  # so is the root group while job records still point at workspace-root paths
+            found[""] = []
+        for project in self.projects.values():
+            found.setdefault(project.group, []).append(project)
+        return {name: found[name] for name in sorted(found, key=lambda name: (not name, name))}
+
+    def job_group_map(self):
+        """{job id: [group, …]} by the top folder of each path the job lists (after aliases).
+        The file itself may be gone: a job stays with its project when results are moved or
+        deleted, as long as the project folder exists. Cached until the project set changes."""
+        signature = (len(self.projects), len(self.folders), len(self.jobs))
+        cached = getattr(self, "_job_groups", None)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        groups = self.groups()
+        numbered = {rel_key(name): name for name in groups if name}
+        mapping = {}
+        for job in self.jobs.values():
+            found = set()
+            for item in job.files:
+                first = self.resolve(item).split("/", 1)[0]
+                if first in numbered:
+                    found.add(numbered[first])
+                elif is_root_path(first):  # output/, artifacts/, root folders and files
+                    found.add("")
+            mapping[job.id] = [name for name in groups if name in found]
+        self._job_groups = (signature, mapping)
+        return mapping
+
+    def job_groups(self, job_id):
+        """Groups (project folders) the job's listed paths belong to."""
+        return self.job_group_map().get(job_id, [])
+
+    def group_jobs(self, group):
+        """Jobs tied to a group, newest first; NO_GROUP gives the jobs tied to none."""
+        mapping = self.job_group_map()
+        if group == NO_GROUP:
+            return [job for job in self.sorted_jobs() if not mapping[job.id]]
+        return [job for job in self.sorted_jobs() if group in mapping[job.id]]
+
+    def group_files(self, group):
+        return [entry for project in self.groups().get(group, []) for entry in project.files]
+
+    def deliverables(self, group):
+        return [entry for entry in self.group_files(group) if is_deliverable(entry)]
 
 
 def read_json(path: Path):
@@ -201,6 +295,30 @@ def rel_key(value):
     while text.startswith("./"):
         text = text[2:]
     return text.strip("/").lower()
+
+
+def load_aliases(root: Path):
+    """(old, new) key pairs from agent_lab/path-aliases.json, longest old prefix first, and problems."""
+    path = root.joinpath(*ALIASES_FILE)
+    if not path.exists():
+        return [], []
+    data = read_json(path)
+    items = data.get("aliases") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return [], ["path-aliases.json 손상: 옛 경로를 새 위치에 연결하지 않음"]
+    pairs = [(rel_key(item["old"]), rel_key(item["new"])) for item in items
+             if isinstance(item, dict) and isinstance(item.get("old"), str) and isinstance(item.get("new"), str)]
+    pairs = [(old, new) for old, new in pairs if old and new and old != new]
+    problems = [] if len(pairs) == len(items) else [f"path-aliases.json: 잘못된 항목 {len(items) - len(pairs)}개 무시"]
+    return sorted(pairs, key=lambda pair: -len(pair[0])), problems
+
+
+def resolve_key(item, aliases):
+    key = rel_key(item)
+    for old, new in aliases:
+        if key == old or key.startswith(old + "/"):
+            return new + key[len(old):]
+    return key
 
 
 def load_job(path: Path) -> Job:
@@ -299,8 +417,8 @@ def walk_files(base: Path, limit: int, skip=frozenset(), recursive=True):
     return False
 
 
-def scan_project(root: Path, key: str, area: str, base: Path, limit: int, recursive=True) -> Project:
-    project = Project(key=key, area=area, path=base, recursive=recursive)
+def scan_project(root: Path, key: str, area: str, base: Path, limit: int, recursive=True, group="") -> Project:
+    project = Project(key=key, area=area, path=base, recursive=recursive, group=group)
     generator = walk_files(base, limit, PROJECT_EXCLUDES.get(key, frozenset()), recursive)
     while True:
         try:
@@ -316,6 +434,30 @@ def scan_project(root: Path, key: str, area: str, base: Path, limit: int, recurs
         project.files.append(FileEntry(path=path, rel=rel, area=area, project=key, size=stat.st_size,
                                        mtime=stat.st_mtime, chatgpt_prompt=is_chatgpt_prompt(path)))
     return project
+
+
+def area_targets(base: Path, key: str, area: str, group=""):
+    """output/ or artifacts/: one project per sub-folder, plus one for files sitting directly in it."""
+    children = sorted(base.iterdir())
+    targets = [(key, area, base, False, group)] if any(child.is_file() for child in children) else []
+    return targets + [(f"{key}/{child.name}", area, child, True, group)
+                      for child in children if child.is_dir() and child.name not in EXCLUDED_DIRS]
+
+
+def project_folder_targets(folder: Path):
+    """A numbered project folder: its output/ and artifacts/ like the root ones, other folders as
+    apps/tools, and its own direct files. Scratch folders (tmp, .runtime) are skipped."""
+    group = folder.name
+    children = sorted(folder.iterdir())
+    targets = [(group, "app", folder, False, group)] if any(child.is_file() for child in children) else []
+    for child in children:
+        if not child.is_dir() or child.name in EXCLUDED_DIRS | SKIPPED_TOP:
+            continue
+        if child.name in SCAN_AREAS:
+            targets += area_targets(child, f"{group}/{child.name}", child.name, group)
+        else:
+            targets.append((f"{group}/{child.name}", "app", child, True, group))
+    return targets
 
 
 def find_root(start: Path):
@@ -341,29 +483,33 @@ def build_index(root: Path, limit: int = MAX_FILES_PER_PROJECT) -> Index:
     else:
         problems.append("agent_lab/jobs 폴더 없음")
 
-    targets = []  # (key, area, path, recursive)
+    aliases, alias_problems = load_aliases(root)
+    problems += alias_problems
+    folders = [child for child in sorted(root.iterdir()) if child.is_dir()] if root.is_dir() else []
+    if any(PROJECT_FOLDER.match(child.name) for child in folders) and not root.joinpath(*ALIASES_FILE).exists():
+        # Moved layout without the old → new table: old job paths stay as written, which may point nowhere.
+        problems.append("path-aliases.json 없음: 옛 경로로 적힌 작업 기록을 새 위치에 연결하지 않음")
+    targets = []  # (key, area, path, recursive, group)
     for area in SCAN_AREAS:
         base = root / area
         if base.is_dir():
-            children = sorted(base.iterdir())
-            if any(child.is_file() for child in children):
-                targets.append((area, area, base, False))
-            for child in children:
-                if child.is_dir() and child.name not in EXCLUDED_DIRS:
-                    targets.append((f"{area}/{child.name}", area, child, True))
+            targets += area_targets(base, area, area)
     referenced = set()
     for job in jobs.values():
         for item in job.files:
-            first = rel_key(item).split("/", 1)[0]
-            if first and first not in SCAN_AREAS and first not in EXCLUDED_DIRS | SKIPPED_TOP and first != "..":
+            first = resolve_key(item, aliases).split("/", 1)[0]
+            if (first and first not in SCAN_AREAS and first not in EXCLUDED_DIRS | SKIPPED_TOP and first != ".."
+                    and not PROJECT_FOLDER.match(first)):
                 referenced.add(first)
-    for child in sorted(root.iterdir()) if root.is_dir() else []:
-        if child.is_dir() and child.name.lower() in referenced:
-            targets.append((child.name, "app", child, True))
+    for child in folders:
+        if PROJECT_FOLDER.match(child.name):
+            targets += project_folder_targets(child)
+        elif child.name.lower() in referenced:
+            targets.append((child.name, "app", child, True, ""))
 
     projects, files = {}, {}
-    for key, area, base, recursive in targets:
-        project = scan_project(root, key, area, base, limit, recursive)
+    for key, area, base, recursive, group in targets:
+        project = scan_project(root, key, area, base, limit, recursive, group)
         if project.truncated:
             problems.append(f"{key}: 파일이 많아 {limit}개까지만 표시")
         projects[key] = project
@@ -372,14 +518,17 @@ def build_index(root: Path, limit: int = MAX_FILES_PER_PROJECT) -> Index:
 
     for job in sorted(jobs.values(), key=lambda item: item.id):
         for item in job.files:
-            key = rel_key(item)
+            key = resolve_key(item, aliases)
             entry = files.get(key)
             if entry is not None and job.id not in entry.jobs:
                 entry.jobs.append(job.id)
             for project in projects.values():
                 if project.owns(key) and job.id not in project.jobs:
                     project.jobs.append(job.id)
-    return Index(root=root, jobs=jobs, projects=projects, files=files, problems=problems)
+    return Index(root=root, jobs=jobs, projects=projects, files=files, problems=problems, aliases=aliases,
+                 folders=[child.name for child in folders if PROJECT_FOLDER.match(child.name)],
+                 root_listed=any(is_root_path(resolve_key(item, aliases).split("/", 1)[0])
+                                 for job in jobs.values() for item in job.files))
 
 
 STALE_DAYS = (90, 180, 365)

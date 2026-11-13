@@ -1,4 +1,4 @@
-"""Main window: navigation tree, item list and preview pane.
+"""Main window: navigation, project pages (jobs / results / folders) and the preview pane.
 
 Browsing never changes files; copy, move and recycle happen only after the
 user confirms them (see fileops.py).
@@ -14,18 +14,20 @@ from pathlib import Path
 import sys
 from urllib.parse import quote, unquote
 
-from PySide6.QtCore import Qt, QUrl, QTimer
-from PySide6.QtGui import QDesktopServices, QPixmap, QFont, QKeySequence, QShortcut, QColor
+from PySide6.QtCore import Qt, QUrl, QTimer, QSize, QRect, QRectF, Signal
+from PySide6.QtGui import (QDesktopServices, QPixmap, QFont, QKeySequence, QShortcut, QColor, QPen, QPainter,
+                           QFontMetrics, QTextLayout, QTextOption)
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QLabel, QTextBrowser, QPlainTextEdit, QStackedWidget, QScrollArea,
     QFileDialog, QCheckBox, QHeaderView, QMessageBox, QApplication, QFrame, QMenu, QAbstractItemView,
-    QStyledItemDelegate, QStyle)
+    QStyledItemDelegate, QStyle, QSizePolicy, QListWidget, QListWidgetItem, QListView, QTabBar, QGridLayout)
 
 import chatgpt
 import fileops
 from indexer import (AIS, UNKNOWN, AI_LABELS, ACTION_LABELS, STATUS_LABELS, STALE_DAYS, build_index,
-                     SCAN_AREAS, search_content, stale_files, rel_key, Index, Project)
+                     SCAN_AREAS, PROJECT_FOLDER, search_content, stale_files, rel_key, Index, Project,
+                     NO_GROUP, group_label, is_deliverable)
 from preview import build_preview, can_open_externally, human_size
 
 PURPLE = "#635BDF"
@@ -34,6 +36,8 @@ ROLE = Qt.ItemDataRole.UserRole
 SORT_ROLE = int(Qt.ItemDataRole.UserRole) + 1  # numeric sort key per column
 KEY_ROLE = int(Qt.ItemDataRole.UserRole) + 2  # tree node key, used to restore selection
 GROUP_ROLE = int(Qt.ItemDataRole.UserRole) + 3  # status colour group of a list row
+GROUP_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 4  # project group of a folder-tab row
+CARD_ROLE = int(Qt.ItemDataRole.UserRole) + 5  # status, roles and counts drawn on a job card
 COLUMNS = ["종류", "이름", "AI", "상태", "크기", "날짜"]
 SIZE_COLUMN, DATE_COLUMN = 4, 5
 STALE_LABELS = {90: "90일 이상", 180: "180일 이상", 365: "1년 이상"}
@@ -79,6 +83,33 @@ QLabel#previewTitle { font-size: 14px; font-weight: 700; color: #2B2A3A; }
 QLabel#previewMeta { color: #75798F; }
 QSplitter::handle { background: transparent; width: 6px; }
 QStatusBar { color: #75798F; }
+QTreeWidget#nav { background: transparent; border: none; padding: 0; font-size: 13px; show-decoration-selected: 1; }
+QTreeWidget#nav::branch:selected { background: #E3E0FB; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
+QScrollBar::handle { background: #D3D2E0; border-radius: 3px; min-height: 28px; min-width: 28px; }
+QScrollBar::handle:hover { background: #B9B7CC; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+QTreeWidget#nav::item { padding: 7px 6px; border-radius: 0; }
+QTreeWidget#folderTree { show-decoration-selected: 1; }
+QTreeWidget#folderTree::item { border-radius: 0; }
+QTreeWidget#folderTree::branch:selected { background: #E9E7FB; }
+QTreeWidget#nav::item:hover { background: #ECEBF6; }
+QTreeWidget#nav::item:selected { background: #E3E0FB; color: #2B2A3A; }
+QLabel#pageTitle { font-size: 20px; font-weight: 700; color: #2B2A3A; }
+QLabel#pageMeta { color: #75798F; }
+QLabel#sectionLabel { color: #3B3A4E; font-weight: 700; padding-top: 4px; }
+QScrollArea#cards, QWidget#cardsBox { background: transparent; border: none; }
+QPushButton#projectCard { background: white; border: 1px solid #E6E5EF; border-radius: 10px;
+    padding: 10px 14px; text-align: left; color: #3B3A4E; min-height: 70px; }
+QPushButton#projectCard:hover { background: #F4F3FD; border-color: #A9A2F0; }
+QListWidget#jobList { background: transparent; border: none; outline: none; }
+QListWidget#jobList::item { background: transparent; border: none; }
+QTabBar#groupTabs::tab { background: transparent; border: none; border-bottom: 2px solid transparent;
+    padding: 6px 2px; margin-right: 18px; color: #75798F; }
+QTabBar#groupTabs::tab:selected { color: #2B2A3A; border-bottom-color: #635BDF; font-weight: 700; }
+QTabBar#groupTabs::tab:hover { color: #2B2A3A; }
 """
 
 
@@ -170,6 +201,154 @@ def folder_of(project, entry):
     """Folder of entry relative to its project root ('' for the root itself)."""
     folder = entry.path.parent.relative_to(project.path).as_posix()
     return "" if folder == "." else folder
+
+
+def direct_files_project(key):
+    """(key, area, numbered folder, tree label) when the project key names a '(직속 파일)' project:
+    output, artifacts, 01_Name or 01_Name/output, 01_Name/artifacts. None otherwise."""
+    if key in SCAN_AREAS:
+        return key, key, "", "(직속 파일)"
+    folder, _, area = key.partition("/")
+    if not PROJECT_FOLDER.match(folder) or (area and area not in SCAN_AREAS):
+        return None
+    return key, area or "app", folder, (area + " (직속 파일)").strip()
+
+
+TABS = ("jobs", "results", "folders")  # tabs of a project page
+RECENT_JOBS = 30
+CARD_COLUMNS, CARD_PADDING = 3, 30  # fewer columns when the page is narrow, so no card line is clipped
+CARD_ROWS_SHOWN, CARD_HEIGHT = 3, 102  # more rows scroll inside the card area
+PILL_TEXT = {"done": "#1E7B3A", "active": "#8A6100", "checked": "#1F5FAE", "repair": "#B42318", "unknown": "#5B5E70"}
+
+
+def roles_text(job):
+    """'Claude 구현 · Codex 검토' from the recorded roles only."""
+    return " · ".join(f"{AI_LABELS.get(ai, ai)} {', '.join(labels)}" for ai, labels in job.roles().items())
+
+
+class CardsArea(QScrollArea):
+    """Home card area; tells the window when its width changes so the columns are redone."""
+    resized = Signal()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.resized.emit()
+
+
+class JobList(QListWidget):
+    """Card heights depend on the width (titles and details wrap), so every width change
+    lays the rows out again; otherwise taller cards would overlap the rows below."""
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.doItemsLayout()
+
+
+class JobCardDelegate(QStyledItemDelegate):
+    """Job rows as cards: the whole title wrapped over as many lines as it needs, then a status
+    pill with the AI roles, file count and project. Date rows are plain group headings."""
+    HEADER, PAD, GAP, PILL = 30, 10, 6, 20
+
+    def title_width(self):
+        return max(120, self.parent().viewport().width() - 2 * self.PAD - 6)
+
+    @staticmethod
+    def wrap(text, font, first_width, width):
+        """Text wrapped to the given widths (the first line may be narrower): every line is
+        returned whole, nothing is elided."""
+        layout = QTextLayout(text, font)
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(option)
+        lines = []
+        layout.beginLayout()
+        while True:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(max(1, width if lines else first_width))
+            lines.append(text[line.textStart():line.textStart() + line.textLength()].strip())
+        layout.endLayout()
+        return lines or [""]
+
+    def title_lines(self, font, text):
+        """The whole title wrapped to the card width."""
+        width = self.title_width()
+        return self.wrap(text, font, width, width)
+
+    @staticmethod
+    def small_font(font):
+        small = QFont(font)
+        small.setPointSizeF(max(7.5, font.pointSizeF() - 1))
+        return small
+
+    def pill_width(self, font, info):
+        return QFontMetrics(self.small_font(font)).horizontalAdvance(info.get("status", "")) + 18
+
+    def meta_lines(self, font, info):
+        """AI roles, file count and project next to the status pill, wrapped below it when the
+        card is narrow or the roles are long, so none of them is hidden."""
+        width = self.title_width()
+        first = width - self.pill_width(font, info) - 8
+        if first < 60:  # no useful room beside the pill: start under it
+            return [""] + self.wrap(info.get("meta", ""), self.small_font(font), width, width)
+        return self.wrap(info.get("meta", ""), self.small_font(font), first, width)
+
+    def sizeHint(self, option, index):
+        if (index.data(ROLE) or ("",))[0] != "job":
+            return QSize(0, self.HEADER)
+        lines = len(self.title_lines(option.font, index.data(Qt.ItemDataRole.DisplayRole) or ""))
+        extra = len(self.meta_lines(option.font, index.data(CARD_ROLE) or {})) - 1
+        return QSize(0, 6 + 2 * self.PAD + lines * option.fontMetrics.lineSpacing() + self.GAP + self.PILL
+                     + extra * QFontMetrics(self.small_font(option.font)).lineSpacing())
+
+    def paint(self, painter, option, index):
+        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(option.font)
+        if (index.data(ROLE) or ("",))[0] != "job":
+            painter.setPen(QColor("#75798F"))
+            painter.drawText(option.rect.adjusted(6, 0, 0, -5),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, text)
+            painter.restore()
+            return
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        card = QRectF(option.rect).adjusted(1.5, 3.5, -1.5, -2.5)
+        painter.setPen(QPen(QColor("#A9A2F0" if selected else "#E6E5EF"), 1))
+        painter.setBrush(QColor("#EFEDFD" if selected else "#F8F8FC" if hover else "#FFFFFF"))
+        painter.drawRoundedRect(card, 8, 8)
+        metrics = option.fontMetrics
+        width = self.title_width()
+        left, top = option.rect.left() + self.PAD + 2, option.rect.top() + 3 + self.PAD
+        painter.setPen(QColor("#2B2A3A"))
+        flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        bottom = top
+        for line in self.title_lines(option.font, text):
+            painter.drawText(QRect(left, bottom, width + 4, metrics.lineSpacing()), flags, line)
+            bottom += metrics.lineSpacing()
+        info = index.data(CARD_ROLE) or {}
+        group = info.get("group", "unknown")
+        small = self.small_font(option.font)
+        painter.setFont(small)
+        small_metrics = QFontMetrics(small)
+        status = info.get("status", "")
+        pill = QRectF(left, bottom + self.GAP, self.pill_width(option.font, info), self.PILL)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(STATUS_COLORS[group]))
+        painter.drawRoundedRect(pill, self.PILL / 2, self.PILL / 2)
+        painter.setPen(QColor(PILL_TEXT[group]))
+        painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, status)
+        painter.setPen(QColor("#75798F"))
+        meta = self.meta_lines(option.font, info)
+        meta_left = int(pill.right()) + 8
+        painter.drawText(QRect(meta_left, int(pill.top()), left + width + 4 - meta_left, self.PILL), flags, meta[0])
+        line_top = int(pill.bottom())
+        for line in meta[1:]:  # wrapped under the pill at the full card width
+            painter.drawText(QRect(left, line_top, width + 4, small_metrics.lineSpacing()), flags, line)
+            line_top += small_metrics.lineSpacing()
+        painter.restore()
 
 
 class ImageView(QScrollArea):
@@ -310,7 +489,7 @@ class MainWindow(QMainWindow):
         self.root_label = QLabel("", objectName="rootLabel")
         self.root_label.setMinimumWidth(80)
         row.addWidget(self.root_label, 1)
-        self.search = QLineEdit(placeholderText="이름·작업 요청 검색 (Enter: 내용까지)")
+        self.search = QLineEdit(placeholderText="프로젝트·작업·파일 검색 (Enter: 내용까지)")
         self.search.setClearButtonEnabled(True)
         self.search.setMinimumWidth(320)
         self.search.textChanged.connect(self.on_search_text)
@@ -328,9 +507,15 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter()
         splitter.setContentsMargins(12, 12, 12, 0)
-        self.tree = QTreeWidget()
+        self.tree = QTreeWidget(objectName="nav")
         self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(14)
+        self.tree.setMinimumWidth(190)
         self.tree.currentItemChanged.connect(self.on_tree)
+        self.tree.itemClicked.connect(self.on_nav_clicked)
+        self.folder_tree = QTreeWidget(objectName="folderTree")
+        self.folder_tree.setHeaderHidden(True)
+        self.folder_tree.currentItemChanged.connect(self.on_folder_tree)
         self.list = QTreeWidget(objectName="itemList")
         self.list.setRootIsDecorated(False)
         separated = SeparatedHeader(Qt.Orientation.Horizontal, self.list)
@@ -362,10 +547,24 @@ class MainWindow(QMainWindow):
         self.trash = fileops.default_trash  # replaced by a fake in the self-test
         self.last_result: fileops.Result | None = None
         self.preview = PreviewPane(self)
-        list_box = QWidget()
-        list_layout = QVBoxLayout(list_box)
-        list_layout.setContentsMargins(0, 0, 0, 0)
-        list_layout.setSpacing(6)
+        self.current_key = None  # nav key, or "project:…" / "folder:…" picked on the folder tab
+        self.current_group = None
+        self.group_tab = "jobs"
+        self.current_job = None
+        self.show_phases = False  # phase logs in the job detail stay folded until asked for
+        self.page_path = None
+        self.cards = {}
+        self.job_list = JobList(objectName="jobList")
+        self.job_list.setItemDelegate(JobCardDelegate(self.job_list))
+        self.job_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.job_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.job_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.job_list.setMouseTracking(True)
+        self.job_list.currentItemChanged.connect(self.on_job_list)
+        self.files_box = QWidget()
+        files_layout = QVBoxLayout(self.files_box)
+        files_layout.setContentsMargins(0, 0, 0, 0)
+        files_layout.setSpacing(6)
         legend = QHBoxLayout()
         legend.setSpacing(4)
         legend.addWidget(QLabel("상태", objectName="legendTitle"))
@@ -376,12 +575,59 @@ class MainWindow(QMainWindow):
             legend.addWidget(chip)
             self.legend_chips[group] = chip
         legend.addStretch()
-        list_layout.addLayout(legend)
-        list_layout.addWidget(self.list, 1)
+        files_layout.addLayout(legend)
+        self.files_split = QSplitter()
+        self.files_split.addWidget(self.folder_tree)
+        self.files_split.addWidget(self.list)
+        self.files_split.setSizes([170, 600])
+        self.files_split.setStretchFactor(1, 1)
+        files_layout.addWidget(self.files_split, 1)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.job_list)
+        self.stack.addWidget(self.files_box)
+
+        center = QWidget(objectName="center")
+        center_layout = QVBoxLayout(center)
+        center_layout.setContentsMargins(6, 0, 6, 0)
+        center_layout.setSpacing(8)
+        head = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        self.page_title = QLabel("", objectName="pageTitle")
+        self.page_meta = QLabel("", objectName="pageMeta", wordWrap=True)
+        titles.addWidget(self.page_title)
+        titles.addWidget(self.page_meta)
+        head.addLayout(titles, 1)
+        self.page_folder_button = QPushButton("폴더 열기")
+        self.page_folder_button.clicked.connect(self.open_page_folder)
+        head.addWidget(self.page_folder_button, 0, Qt.AlignmentFlag.AlignTop)
+        center_layout.addLayout(head)
+        self.cards_area = CardsArea(objectName="cards")
+        self.cards_area.resized.connect(self.layout_cards)
+        self.card_columns = 0
+        self.cards_area.setWidgetResizable(True)
+        self.cards_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.cards_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.cards_box = QWidget(objectName="cardsBox")
+        self.cards_grid = QGridLayout(self.cards_box)
+        self.cards_grid.setContentsMargins(0, 0, 0, 0)
+        self.cards_grid.setSpacing(8)
+        self.cards_area.setWidget(self.cards_box)
+        center_layout.addWidget(self.cards_area)
+        self.section_label = QLabel("", objectName="sectionLabel")
+        center_layout.addWidget(self.section_label)
+        self.tabs = QTabBar(objectName="groupTabs")
+        self.tabs.setExpanding(False)
+        self.tabs.setDrawBase(False)
+        for _ in TABS:
+            self.tabs.addTab("")
+        self.tabs.currentChanged.connect(self.on_tab)
+        center_layout.addWidget(self.tabs)
+        center_layout.addWidget(self.stack, 1)
         splitter.addWidget(self.tree)
-        splitter.addWidget(list_box)
+        splitter.addWidget(center)
         splitter.addWidget(self.preview)
-        splitter.setSizes([260, 660, 520])
+        splitter.setSizes([210, 780, 426])
         splitter.setStretchFactor(2, 1)
         outer.addWidget(splitter, 1)
         QShortcut(QKeySequence("Ctrl+F"), self, self.search.setFocus)
@@ -398,8 +644,7 @@ class MainWindow(QMainWindow):
     def reload(self):
         if not self.root:
             return self.choose_root()
-        current = self.tree.currentItem()
-        keep = current.data(0, KEY_ROLE) if current is not None else None
+        keep = self.current_key
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             self.index = build_index(self.root)
@@ -444,7 +689,7 @@ class MainWindow(QMainWindow):
             self.reload()
         return True
 
-    # ----- tree ---------------------------------------------------------
+    # ----- navigation ---------------------------------------------------
     def add_node(self, parent, text, data=None, count=None, color=None):
         label = f"{text}  ({count})" if count is not None else text
         item = QTreeWidgetItem([label])
@@ -454,41 +699,44 @@ class MainWindow(QMainWindow):
         (parent.addChild if isinstance(parent, QTreeWidgetItem) else parent.addTopLevelItem)(item)
         return item
 
+    def add_group_node(self, group, count):
+        node = self.add_node(self.projects_node, group_label(group), ("group", group), count)
+        node.setToolTip(0, group or str(self.index.root))
+        node.setData(0, KEY_ROLE, "group:" + group)
+        self.nodes["group:" + group] = node
+        self.group_nodes[group] = node
+        return node
+
+    def add_project_node(self, project, label):
+        """Top-level row of the folder tab; only the rows of the shown group are visible."""
+        node = self.add_node(self.folder_tree, label, ("project", project.key), len(project.files))
+        node.setData(0, GROUP_NAME_ROLE, project.group)
+        node.setToolTip(0, f"{project.key}\n관련 작업 {len(project.jobs)}건 · "
+                           f"AI: {ai_text(self.index.project_ais(project))}")
+        self.nodes["project:" + project.key] = node
+        return node
+
     def populate_tree(self):
         index = self.index
         self.tree.blockSignals(True)
+        self.folder_tree.blockSignals(True)
         self.tree.clear()
+        self.folder_tree.clear()
         self.nodes = {}
-        self.area_nodes = {}
-        overview =self.add_node(self.tree, "개요", ("overview", None))
+        self.group_nodes = {}
+        overview = self.add_node(self.tree, "홈", ("overview", None))
         self.nodes["overview"] = overview
 
-        by_ai = self.add_node(self.tree, "AI별", None)
+        history = self.add_node(self.tree, "전체 작업 이력", ("history", None), len(index.jobs))
+        self.nodes["history"] = history
         for ai in (*AIS, UNKNOWN):
             count = len(index.jobs_for_ai(ai))
             if ai == "chatgpt":
                 count += len(index.chatgpt_prompts()) + len(self.conversations)
             if ai == UNKNOWN and not count:
                 continue
-            self.nodes["ai:" + ai] = self.add_node(by_ai, AI_LABELS[ai], ("ai", ai), count, AI_COLORS[ai])
-
-        projects = self.add_node(self.tree, "프로젝트", None)
-        self.projects_node = projects
-        area_labels = {"output": "output", "artifacts": "artifacts", "app": "앱·도구"}
-        for area, label in area_labels.items():
-            members = [project for project in index.projects.values() if project.area == area]
-            if not members:
-                continue
-            group = self.add_node(projects, label, None, len(members))
-            self.area_nodes[area] = group
-            for project in members:
-                name = project.key.split("/", 1)[-1] if project.recursive else "(직속 파일)"
-                node = self.add_node(group, name, ("project", project.key), len(project.files))
-                node.setToolTip(0, f"{project.key}\n관련 작업 {len(project.jobs)}건 · AI: {ai_text(index.project_ais(project))}")
-                self.nodes["project:" + project.key] = node
-                self.add_folders(node, project)
-
-        dates = self.add_node(self.tree, "날짜별 작업", None)
+            self.nodes["ai:" + ai] = self.add_node(history, AI_LABELS[ai], ("ai", ai), count, AI_COLORS[ai])
+        dates = self.add_node(history, "날짜별", None)
         days = defaultdict(list)
         for job in index.sorted_jobs():
             days[job.when.strftime("%Y-%m-%d") if job.when else "날짜 미상"].append(job)
@@ -499,9 +747,11 @@ class MainWindow(QMainWindow):
                 months[month] = self.add_node(dates, month, None)
             self.nodes["day:" + day] = self.add_node(months[month], day, ("day", day), len(days[day]))
 
-        self.nodes["unclassified"] = self.add_node(self.tree, "미분류 파일", ("unclassified", None),
+        cleanup = self.add_node(self.tree, "파일 정리", ("cleanup", None))
+        self.nodes["cleanup"] = cleanup
+        self.nodes["unclassified"] = self.add_node(cleanup, "미분류 파일", ("unclassified", None),
                                                    len(index.unclassified()))
-        stale = self.add_node(self.tree, "오래된 파일", None)
+        stale = self.add_node(cleanup, "오래된 파일", None)
         stale.setToolTip(0, "마지막 수정 시각 기준")
         for days in STALE_DAYS:
             self.nodes[f"stale:{days}"] = self.add_node(stale, STALE_LABELS[days], ("stale", f"{days}"),
@@ -511,14 +761,26 @@ class MainWindow(QMainWindow):
             stale, f"{STALE_LABELS[days]} · 작업 기록 없음", ("stale", f"{days}:unlinked"),
             len(stale_files(index, days, unlinked_only=True)))
         if index.problems:
-            self.nodes["problems"] = self.add_node(self.tree, "점검 필요", ("problems", None), len(index.problems))
+            self.nodes["problems"] = self.add_node(cleanup, "점검 필요", ("problems", None), len(index.problems))
+
+        # One row per project group; its folders live on the project page's folder tab.
+        self.projects_node = self.add_node(self.tree, "프로젝트", None)
+        for group, members in index.groups().items():
+            self.add_group_node(group, len(index.group_jobs(group)))
+            for project in members:
+                name = project.key[len(group) + 1:] if group and project.key != group else (
+                    "" if group else project.key)
+                label = name if project.recursive else (name + " (직속 파일)").strip()
+                self.add_folders(self.add_project_node(project, label), project)
+        loose = index.group_jobs(NO_GROUP)
+        if loose:
+            self.add_group_node(NO_GROUP, len(loose))
         for key, node in self.nodes.items():
             node.setData(0, KEY_ROLE, key)
-        for item in (by_ai, projects, dates, stale):
+        for item in (history, cleanup, stale, self.projects_node):
             item.setExpanded(True)
-        for month in list(months.values())[:1]:
-            month.setExpanded(True)
         self.tree.blockSignals(False)
+        self.folder_tree.blockSignals(False)
         self.tree.setCurrentItem(overview)
         self.on_tree(overview, None)
 
@@ -543,22 +805,20 @@ class MainWindow(QMainWindow):
         (count 0) while it exists on disk; otherwise its nearest remaining parent is used."""
         if key in self.nodes:
             return self.select_node(key)
-        if key.startswith("project:") and key[len("project:"):] in SCAN_AREAS:
-            # The '(직속 파일)' node exists only while output/ or artifacts/ hold files directly.
-            area = key[len("project:"):]
-            if not (self.index.root / area).is_dir():
+        direct = direct_files_project(key[len("project:"):]) if key.startswith("project:") else None
+        if direct is not None:
+            # A '(직속 파일)' row exists only while its folder (output/, artifacts/, 01_…/,
+            # 01_…/output/ …) holds files directly.
+            project_key, area, folder, label = direct
+            path = self.index.root / project_key
+            if not path.is_dir():
                 return self.select_node("overview")
-            group = self.area_nodes.get(area)
-            if group is None:  # the area held only direct files, so its group vanished too
-                group = self.add_node(self.projects_node, area, None, 1)
-                self.area_nodes[area] = group
-                self.projects_node.setExpanded(True)
-            group.setExpanded(True)
-            empty = Project(key=area, area=area, path=self.index.root / area, recursive=False)
-            self.index.projects[area] = empty
-            node = self.add_node(group, "(직속 파일)", ("project", area), 0)
-            node.setData(0, KEY_ROLE, key)
-            self.nodes[key] = node
+            if folder not in self.group_nodes:  # the group held nothing else, so it vanished too
+                self.add_group_node(folder, len(self.index.group_jobs(folder)))
+            empty = Project(key=project_key, area=area, path=path, recursive=False, group=folder)
+            self.index.projects[project_key] = empty
+            name = label if folder else f"{project_key} (직속 파일)"
+            self.add_project_node(empty, name).setData(0, KEY_ROLE, key)
             return self.select_node(key)
         if not key.startswith("folder:"):
             return self.select_node("overview")
@@ -580,40 +840,223 @@ class MainWindow(QMainWindow):
             parent = self.nodes[node_key]
         return self.select_node(f"folder:{project_key}|{'/'.join(parts)}" if parts else "project:" + project_key)
 
+    def group_of(self, node):
+        """Group of a folder-tab node (stored on its top-level project row)."""
+        while node.parent() is not None:
+            node = node.parent()
+        return node.data(0, GROUP_NAME_ROLE)
+
     def select_node(self, key):
         node = self.nodes.get(key)
-        if node is not None:
+        if node is None:
+            return False
+        if node.treeWidget() is self.folder_tree:
+            group = self.group_of(node)
+            self.tree.blockSignals(True)
+            self.tree.setCurrentItem(self.group_nodes[group])
+            self.tree.blockSignals(False)
+            self.current_group = group
+            self.group_tab = "folders"
+            self.clear_search()
+            self.render_group(key)
+        elif self.tree.currentItem() is node:
+            self.on_tree(node)
+        else:
             self.tree.setCurrentItem(node)
-        return node is not None
+        return True
 
-    # ----- list ---------------------------------------------------------
-    def on_tree(self, item, _previous=None):
-        if item is None:
-            return
-        data = item.data(0, ROLE)
-        self.current_node = data
-        if data is None:
-            return
+    def clear_search(self):
         if self.search.text().strip():
             self.search.blockSignals(True)
             self.search.clear()
             self.search.blockSignals(False)
+
+    def rerender(self):
+        """Draw the current place again (after a search is cleared)."""
+        node = self.nodes.get(self.current_key)
+        if node is None:
+            return
+        if node.treeWidget() is self.folder_tree:
+            self.render_group(self.current_key)
+        else:
+            self.on_tree(node)
+
+    def on_nav_clicked(self, _item, _column=0):
+        if self.search.text().strip():  # clicking the place already selected leaves the search results
+            self.clear_search()
+            self.rerender()
+
+    # ----- pages --------------------------------------------------------
+    def set_page(self, title, meta="", view="files", path=None, tabs=False, cards=False, folders=False,
+                 section=""):
+        self.page_title.setText(title)
+        self.page_meta.setText(meta)
+        self.page_meta.setVisible(bool(meta))
+        self.page_path = Path(path) if path else None
+        self.page_folder_button.setVisible(self.page_path is not None)
+        self.tabs.setVisible(tabs)
+        self.cards_area.setVisible(cards)
+        self.section_label.setText(section)
+        self.section_label.setVisible(bool(section))
+        self.folder_tree.setVisible(folders)
+        self.view = view
+        self.stack.setCurrentWidget(self.job_list if view == "jobs" else self.files_box)
+
+    def open_page_folder(self):
+        if self.page_path and self.page_path.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.page_path)))
+
+    def show_rows(self, jobs=(), files=(), convs=(), projects=False,
+                  sort=(DATE_COLUMN, Qt.SortOrder.DescendingOrder)):
+        """Fill the table and the job cards with the same rows; the page picks which one shows."""
+        self.fill_jobs(jobs, projects)
+        return self.fill_list(jobs=jobs, files=files, convs=convs, sort=sort)
+
+    def fill_jobs(self, jobs, projects=False):
+        index = self.index
+        self.job_list.blockSignals(True)
+        self.job_list.clear()
+        day = None
+        for job in jobs:
+            stamp = job.when.strftime("%Y-%m-%d") if job.when else "날짜 미상"
+            if stamp != day:
+                day = stamp
+                head = QListWidgetItem(stamp)
+                head.setFlags(Qt.ItemFlag.NoItemFlags)
+                head.setData(ROLE, ("day", stamp))
+                self.job_list.addItem(head)
+            names = (", ".join(group_label(group) for group in index.job_groups(job.id))
+                     or group_label(NO_GROUP)) if projects else ""
+            parts = [roles_text(job), f"파일 {len(index.job_files(job.id))}개", names]
+            item = QListWidgetItem(job.full_title)  # uncut: the card wraps it to the real width
+            item.setData(ROLE, ("job", job.id))
+            item.setData(CARD_ROLE, {"status": status_text(job), "group": status_group(job),
+                                     "meta": " · ".join(part for part in parts if part)})
+            item.setToolTip("\n\n".join(dict.fromkeys(
+                text for text in (job.full_title, (job.request or job.goal)[:600]) if text)))
+            self.job_list.addItem(item)
+        if not jobs:
+            empty = QListWidgetItem("작업 기록 없음")
+            empty.setFlags(Qt.ItemFlag.NoItemFlags)
+            empty.setData(ROLE, ("empty", None))
+            self.job_list.addItem(empty)
+        self.job_list.blockSignals(False)
+
+    def fill_cards(self):
+        """Home: one card per project group."""
+        index = self.index
+        while self.cards_grid.count():
+            widget = self.cards_grid.takeAt(0).widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.cards = {}
+        for group in index.groups():
+            jobs = index.group_jobs(group)
+            last = next((job.when for job in jobs if job.when), None)
+            repair = sum(1 for job in jobs if status_group(job) == "repair")
+            lines = [group_label(group), f"작업 {len(jobs)}건 · 파일 {len(index.group_files(group)):,}개",
+                     f"최근 작업 {last:%Y-%m-%d}" if last else "작업 기록 없음", f"수정 필요 {repair}건"]
+            card = QPushButton("\n".join(lines), objectName="projectCard")
+            card.setCursor(Qt.CursorShape.PointingHandCursor)
+            card.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)  # equal columns
+            card.setToolTip("\n".join([group or str(index.root), *lines[1:]]))
+            card.clicked.connect(lambda _=False, key="group:" + group: self.select_node(key))
+            self.cards[group] = card
+        self.card_columns = 0
+        self.layout_cards()
+
+    def layout_cards(self):
+        """Put the cards in as many columns (at most CARD_COLUMNS) as show every card line whole."""
+        if not self.cards:
+            return
+        spacing = self.cards_grid.spacing()
+        needed = CARD_PADDING + max(card.fontMetrics().horizontalAdvance(line)
+                                    for card in self.cards.values() for line in card.text().splitlines())
+        columns = max(1, min(CARD_COLUMNS, (self.cards_area.viewport().width() + spacing) // (needed + spacing)))
+        if columns == self.card_columns:
+            return
+        self.card_columns = columns
+        while self.cards_grid.count():
+            self.cards_grid.takeAt(0)
+        for position, card in enumerate(self.cards.values()):
+            self.cards_grid.addWidget(card, position // columns, position % columns)
+        rows = (len(self.cards) + columns - 1) // columns
+        self.cards_area.setFixedHeight(min(rows, CARD_ROWS_SHOWN) * CARD_HEIGHT)
+
+    def render_home(self):
+        index = self.index
+        self.show_rows(jobs=index.sorted_jobs()[:RECENT_JOBS], projects=True)
+        self.fill_cards()
+        self.set_page("홈", str(index.root), "jobs", cards=bool(self.cards), section="최근 작업")
+        self.layout_cards()
+        self.show_overview()
+
+    def on_tab(self, position):
+        if 0 <= position < len(TABS) and self.current_group is not None:
+            self.group_tab = TABS[position]
+            self.clear_search()
+            self.render_group()
+
+    def render_group(self, folder_key=None):
+        """Project page: jobs / results / folders of one group."""
+        index, group = self.index, self.current_group
+        real = group != NO_GROUP  # the 'no project' group holds jobs only
+        jobs = index.group_jobs(group)
+        files = index.group_files(group) if real else []
+        results = [entry for entry in files if is_deliverable(entry)]
+        tab = self.group_tab if real else "jobs"
+        self.tabs.blockSignals(True)
+        for position, text in enumerate((f"작업 {len(jobs)}", f"결과물 {len(results)}", "폴더")):
+            self.tabs.setTabText(position, text)
+            self.tabs.setTabVisible(position, real or position == 0)
+        self.tabs.setCurrentIndex(TABS.index(tab))
+        self.tabs.blockSignals(False)
+        last = next((job.when for job in jobs if job.when), None)
+        meta = f"작업 {len(jobs)}건 · 파일 {len(files):,}개" + (f" · 마지막 작업 {last:%Y-%m-%d}" if last else "")
+        path = (index.root / group if group else index.root) if real else None
+        self.current_key = "group:" + group
+        if tab == "folders":
+            first = None
+            for row in range(self.folder_tree.topLevelItemCount()):
+                item = self.folder_tree.topLevelItem(row)
+                shown = item.data(0, GROUP_NAME_ROLE) == group
+                item.setHidden(not shown)
+                first = first or (item if shown else None)
+            self.set_page(group_label(group), meta, "files", path, tabs=True, folders=True)
+            target = self.nodes.get(folder_key) if folder_key else None
+            if target is None or target.treeWidget() is not self.folder_tree:
+                target = first
+            if target is not None:
+                self.folder_tree.blockSignals(True)
+                self.folder_tree.setCurrentItem(target)
+                self.folder_tree.blockSignals(False)
+                return self.on_folder_tree(target)
+            self.fill_list()
+        elif tab == "results":
+            self.fill_jobs(jobs)
+            self.fill_list(files=results)
+            self.set_page(group_label(group), meta, "files", path, tabs=True)
+        else:
+            self.show_rows(jobs=jobs)
+            self.set_page(group_label(group), meta, "jobs", path, tabs=True)
+        self.show_group(group, jobs, files, results)
+
+    def on_folder_tree(self, item, _previous=None):
+        """Folder tab: a project folder or one of its sub-folders."""
+        if item is None or item.data(0, ROLE) is None:
+            return
+        data = item.data(0, ROLE)
+        self.current_node = data
+        self.current_key = item.data(0, KEY_ROLE)
+        self.clear_search()
         kind, key = data
         index = self.index
-        if kind == "overview":
-            self.fill_list(jobs=index.sorted_jobs()[:30])
-            self.show_overview()
-        elif kind == "ai":
-            files = index.chatgpt_prompts() if key == "chatgpt" else []
-            convs = self.conversations if key == "chatgpt" else []
-            self.fill_list(jobs=index.jobs_for_ai(key), files=files, convs=convs)
-            self.show_ai(key)
-        elif kind == "project":
+        if kind == "project":
             project = index.projects[key]
             jobs = [index.jobs[job_id] for job_id in reversed(project.jobs)]
             self.fill_list(jobs=jobs, files=project.files)
             self.show_project(project)
-        elif kind == "folder":
+        else:
             project_key, folder = key.split("|", 1)
             project = index.projects[project_key]
             files = [entry for entry in project.files
@@ -626,27 +1069,79 @@ class MainWindow(QMainWindow):
                 f"<p>파일 {len(files)}개 (하위 폴더 포함)</p><p>{ai_badges_html(self.ais_of(jobs))}</p>"
                 + "".join(f'<p><a href="hub:job/{escape(job_id)}">{escape(index.jobs[job_id].title)}</a></p>'
                           for job_id in jobs), path, kind="folder")
+
+    def on_tree(self, item, _previous=None):
+        if item is None:
+            return
+        data = item.data(0, ROLE)
+        self.current_node = data
+        if data is None:
+            return
+        self.current_key = item.data(0, KEY_ROLE)
+        self.clear_search()
+        kind, key = data
+        index = self.index
+        ascending = (DATE_COLUMN, Qt.SortOrder.AscendingOrder)
+        if kind == "overview":
+            self.render_home()
+        elif kind == "group":
+            self.current_group = key
+            self.render_group()
+        elif kind == "history":
+            jobs = index.sorted_jobs()
+            self.show_rows(jobs=jobs, projects=True)
+            self.set_page("전체 작업 이력", f"작업 {len(jobs)}건 · 최근 순", "jobs")
+            self.show_history(jobs)
+        elif kind == "ai":
+            files = index.chatgpt_prompts() if key == "chatgpt" else []
+            convs = self.conversations if key == "chatgpt" else []
+            jobs = index.jobs_for_ai(key)
+            self.show_rows(jobs=jobs, files=files, convs=convs, projects=True)
+            # ChatGPT mixes prompts and conversations with jobs, so it keeps the table.
+            self.set_page(AI_LABELS[key], f"참여 작업 {len(jobs)}건", "files" if files or convs else "jobs")
+            self.show_ai(key)
         elif kind == "day":
             jobs = [job for job in index.sorted_jobs()
                     if (job.when.strftime("%Y-%m-%d") if job.when else "날짜 미상") == key]
-            self.fill_list(jobs=jobs)
+            self.show_rows(jobs=jobs, projects=True)
+            self.set_page(key, f"작업 {len(jobs)}건", "jobs")
             self.preview.show_html(key, f"작업 {len(jobs)}건", "".join(
                 f'<p><a href="hub:job/{escape(job.id)}">{escape(job.title)}</a><br>{ai_badges_html(job.ais, job.roles())}</p>'
                 for job in jobs))
+        elif kind == "cleanup":
+            files = stale_files(index, STALE_DAYS[0], unlinked_only=True)
+            self.show_rows(files=files, sort=ascending)
+            self.set_page("파일 정리", "오래 수정하지 않았고 작업 기록에도 없는 파일부터 표시", "files")
+            links = [("unclassified", "미분류 파일", len(index.unclassified()))]
+            links += [(f"stale:{days}", f"오래된 파일 · {STALE_LABELS[days]}", len(stale_files(index, days)))
+                      for days in STALE_DAYS]
+            if index.problems:
+                links.append(("problems", "점검 필요", len(index.problems)))
+            self.preview.show_html(
+                "파일 정리", f"{STALE_LABELS[STALE_DAYS[0]]} · 작업 기록 없음 {len(files)}개 · "
+                             f"합계 {human_size(sum(entry.size for entry in files))}",
+                "<p>정리 후보를 모아 보는 곳. 판단 근거는 마지막 <b>수정</b> 시각이며, 실제로 쓰지 않는 "
+                "파일인지는 직접 확인 필요.</p><ul>"
+                + "".join(f'<li><a href="hub:node/{key}">{escape(label)}</a> {count}개</li>'
+                          for key, label, count in links)
+                + "</ul><p>파일을 하나 또는 여러 개 고른 뒤 <b>우클릭</b>해서 복사·이동·휴지통으로 삭제.</p>",
+                kind="cleanup")
         elif kind == "unclassified":
             files = index.unclassified()
-            self.fill_list(files=files)
+            self.show_rows(files=files)
+            self.set_page("미분류 파일", f"{len(files):,}개", "files")
             self.preview.show_html("미분류 파일", f"{len(files)}개",
                                    "<p>어떤 작업의 task.json 파일 목록에도 없어 AI를 특정할 근거가 없는 파일.</p>"
                                    "<p>프로젝트 단위 관련 작업은 프로젝트 화면에서 확인.</p>")
         elif kind == "stale":
             days, _, flag = key.partition(":")
             files = stale_files(index, int(days), unlinked_only=flag == "unlinked")
-            self.fill_list(files=files, sort=(DATE_COLUMN, Qt.SortOrder.AscendingOrder))
+            self.show_rows(files=files, sort=ascending)
             total = sum(entry.size for entry in files)
+            title = f"오래된 파일 · {STALE_LABELS[int(days)]}" + (" · 작업 기록 없음" if flag else "")
+            self.set_page(title, f"파일 {len(files)}개 · 합계 {human_size(total)} · 오래된 순", "files")
             self.preview.show_html(
-                f"오래된 파일 · {STALE_LABELS[int(days)]}" + (" · 작업 기록 없음" if flag else ""),
-                f"파일 {len(files)}개 · 합계 {human_size(total)}",
+                title, f"파일 {len(files)}개 · 합계 {human_size(total)}",
                 f"<p>마지막 <b>수정</b> 시각이 {STALE_LABELS[int(days)]} 지난 파일, 오래된 순.</p>"
                 + ("<p>그중 어떤 작업의 task.json 파일 목록에도 없는 파일만 표시.</p>" if flag else "")
                 + "<p style='color:#75798F'>마지막으로 연 시각은 미리보기·백신 검사·OneDrive 동기화만으로도 바뀌어 "
@@ -654,7 +1149,8 @@ class MainWindow(QMainWindow):
                   "<p>파일을 하나 또는 여러 개 고른 뒤 <b>우클릭</b>해서 복사·이동·휴지통으로 삭제.</p>",
                 kind="stale")
         elif kind == "problems":
-            self.fill_list()
+            self.show_rows()
+            self.set_page("점검 필요", f"{len(index.problems)}건", "files")
             self.preview.show_html("점검 필요", f"{len(index.problems)}건",
                                    "<ul>" + "".join(f"<li>{escape(text)}</li>" for text in index.problems) + "</ul>")
 
@@ -821,12 +1317,16 @@ class MainWindow(QMainWindow):
         kind, key = item.data(0, ROLE)
         {"job": self.show_job, "file": self.show_file, "conv": self.show_conversation}[kind](key)
 
+    def on_job_list(self, item, _previous=None):
+        if item is not None and (item.data(ROLE) or ("",))[0] == "job":
+            self.show_job(item.data(ROLE)[1])
+
     # ----- search -------------------------------------------------------
     def on_search_text(self, text):
         if text.strip():
             self.run_search(content=False)
-        elif self.tree.currentItem() is not None:
-            self.on_tree(self.tree.currentItem())
+        else:
+            self.rerender()
 
     def run_search(self, content=None):
         query = self.search.text().strip().lower()
@@ -846,7 +1346,8 @@ class MainWindow(QMainWindow):
                 QApplication.restoreOverrideCursor()
         convs = [conv for conv in self.conversations
                  if query in conv.title.lower() or (content and any(query in m.text.lower() for m in conv.messages))]
-        count = self.fill_list(jobs=jobs, files=files, convs=convs)
+        count = self.show_rows(jobs=jobs, files=files, convs=convs, projects=True)
+        self.set_page("검색 결과", f"'{query}' {count}건" + (" (내용 포함)" if content else ""), "files")
         self.statusBar().showMessage(f"'{query}' 검색 결과 {count}건" + (" (내용 포함)" if content else ""))
         return count
 
@@ -858,6 +1359,9 @@ class MainWindow(QMainWindow):
             self.show_path(Path(unquote(link[len("hub:file/"):])))
         elif link.startswith("hub:node/"):
             self.select_node(link[len("hub:node/"):])
+        elif link == "hub:toggle/phases" and self.current_job in self.index.jobs:
+            self.show_phases = not self.show_phases
+            self.show_job(self.current_job)
 
     def show_path(self, path):
         entry = self.index.files.get(rel_key(path.relative_to(self.index.root).as_posix())) \
@@ -887,24 +1391,30 @@ class MainWindow(QMainWindow):
 
     def show_job(self, job_id):
         job = self.index.jobs[job_id]
+        if job_id != self.current_job:
+            self.show_phases = False  # phase logs start folded for every job
+        self.current_job = job_id
         root = self.index.root
-        rows = []
+        rows, steps = [], []
         for phase in job.phases:
             who = AI_LABELS.get(phase.provider, phase.provider) + (f" ({phase.model})" if phase.model else "")
             color = AI_COLORS.get(phase.provider, "#7A7F93")
+            action = ACTION_LABELS.get(phase.action, phase.action)
+            steps.append(f'{escape(action)} <span style="color:{color}"><b>{escape(who)}</b></span>')
             files = " · ".join(self.file_link(path) for path in phase.files[:12])
             notes = escape(phase.notes[:400] + ("…" if len(phase.notes) > 400 else ""))
             error = f'<br><span style="color:#B42318">{escape(phase.error[:300])}</span>' if phase.error else ""
             rows.append(f'<tr><td style="padding:4px 8px 4px 0;vertical-align:top"><b>{escape(phase.name)}</b></td>'
-                        f'<td style="padding:4px 8px;vertical-align:top">{escape(ACTION_LABELS.get(phase.action, phase.action))}</td>'
+                        f'<td style="padding:4px 8px;vertical-align:top">{escape(action)}</td>'
                         f'<td style="padding:4px 8px;vertical-align:top;color:{color}"><b>{escape(who)}</b></td>'
                         f'<td style="padding:4px 8px;vertical-align:top">{escape(STATUS_LABELS.get(phase.outcome, phase.outcome))}'
                         f'{"<br><span style=color:#75798F>" + notes + "</span>" if notes else ""}{error}'
                         f'{"<br>" + files if files else ""}</td></tr>')
         task_files = []
         for item in job.files:
-            entry = self.index.files.get(rel_key(item))
-            path = entry.path if entry else (root / item)
+            key = self.index.resolve(item)  # old paths follow moved-folder aliases
+            entry = self.index.files.get(key)
+            path = entry.path if entry else (root / item if key == rel_key(item) else root / key)
             task_files.append(f"<li>{self.file_link(path, item)}</li>" if path.exists()
                               else f'<li>{escape(item)} <span style="color:#B42318">(현재 없음)</span></li>')
         acceptance = "".join(f"<li><b>{escape(str(item.get('id', '')))}</b> {escape(str(item.get('description', '')))}</li>"
@@ -916,18 +1426,31 @@ class MainWindow(QMainWindow):
             extra.append(self.file_link(job.summary, "WORK_SUMMARY.md"))
         extra.append(self.file_link(job.path / "manifest.json", "manifest.json"))
         problems = "".join(f'<p style="color:#B42318">{escape(text)}</p>' for text in job.problems)
-        html = (f"{problems}<h3>AI 역할</h3><p>{ai_badges_html(job.ais, job.roles())}</p>"
+        groups = ", ".join(group_label(group) for group in self.index.job_groups(job_id)) or "프로젝트 미지정"
+        verdict = [status_text(job)]
+        if job.checks_passed is not None:
+            verdict.append(f"검사 {'통과' if job.checks_passed else '실패'}")
+        counts = defaultdict(int)
+        for phase in job.phases:
+            counts[phase.action] += 1
+        verdict += [f"{ACTION_LABELS[action]} {counts[action]}회" for action in ("check", "review") if counts[action]]
+        toggle = (f'<a href="hub:toggle/phases">{"단계별 로그 접기" if self.show_phases else "단계별 로그 보기"}</a>'
+                  f' <span style="color:#75798F">({len(job.phases)}단계)</span>')
+        detail = (f"<table>{''.join(rows) or '<tr><td>기록 없음</td></tr>'}</table>" if self.show_phases else "")
+        html = (f"{problems}<h3>요청 원문</h3><p style='white-space:pre-wrap'>{escape(job.request) or '없음'}</p>"
+                f"<h3>결과 파일</h3><ul>{''.join(task_files) or '<li>없음</li>'}</ul>"
+                f"<h3>검사와 검토</h3><p>{escape(' · '.join(verdict))}</p>"
+                f"<p>{ai_badges_html(job.ais, job.roles())}</p>"
+                f"<p>{' → '.join(steps) or '단계 기록 없음'}</p>"
                 f"<p style='color:#75798F'>역할은 manifest의 implementer와 단계별 model 기록만 근거로 표시.</p>"
-                f"<h3>요청 원문</h3><p style='white-space:pre-wrap'>{escape(job.request) or '없음'}</p>"
+                f"<p>{toggle}</p>{detail}"
                 f"<h3>목표</h3><p style='white-space:pre-wrap'>{escape(job.goal) or '없음'}</p>"
-                f"<h3>단계</h3><table>{''.join(rows) or '<tr><td>기록 없음</td></tr>'}</table>"
                 f"<h3>완료 기준</h3><ul>{acceptance or '<li>없음</li>'}</ul>"
                 f"<h3>검사 명령</h3><ul>{checks or '<li>없음</li>'}</ul>"
-                f"<h3>작업 파일</h3><ul>{''.join(task_files) or '<li>없음</li>'}</ul>"
                 f"<p>{' · '.join(extra)}</p>")
-        meta = (f"{escape(job.id)} · {escape(job.mode or '모드 미상')}/{escape(job.complexity or '-')} · "
-                f"{escape(status_text(job))}" + (f" · 검사 {'통과' if job.checks_passed else '실패'}"
-                                                  if job.checks_passed is not None else ""))
+        meta = (f"{escape(groups)} · {escape(fmt_time(job.when) or '날짜 미상')} · {escape(job.id)} · "
+                f"{escape(job.mode or '모드 미상')}/{escape(job.complexity or '-')} · {escape(status_text(job))}"
+                + (f" · 검사 {'통과' if job.checks_passed else '실패'}" if job.checks_passed is not None else ""))
         self.preview.show_html(job.title, meta, html, job.path, kind="job")
         return html
 
@@ -956,9 +1479,40 @@ class MainWindow(QMainWindow):
                          for job in index.sorted_jobs()[:8])
         html = ("<h3>AI별 참여</h3>" + "".join(cards)
                 + f"<h3>최근 작업</h3><ul>{recent or '<li>없음</li>'}</ul>"
-                + f"<p style='color:#75798F'>미분류 파일 {len(index.unclassified())}개 · 둘러보기만으로는 파일을 바꾸지 않음. "
+                + f"<p style='color:#75798F'>미분류 파일 {len(index.unclassified()):,}개 · 둘러보기만으로는 파일을 바꾸지 않음. "
                   "복사·이동·휴지통 삭제는 파일 목록 우클릭에서 확인 후 실행.</p>")
-        self.preview.show_html("개요", escape(str(index.root)), html, index.root, kind="overview")
+        self.preview.show_html("홈", escape(str(index.root)), html, index.root, kind="overview")
+
+    def show_history(self, jobs):
+        counts = defaultdict(int)
+        for job in jobs:
+            counts[status_group(job)] += 1
+        summary = " · ".join(f"{label} {counts[group]}건" for group, label in STATUS_LEGEND if counts[group])
+        self.preview.show_html("전체 작업 이력", f"작업 {len(jobs)}건",
+                               f"<p>{escape(summary) or '작업 기록 없음'}</p>"
+                               "<p>작업을 고르면 요청, 결과 파일, 검사·검토 결과를 표시.</p>"
+                               "<p style='color:#75798F'>왼쪽에서 AI별·날짜별로 좁혀 볼 수 있음.</p>", kind="history")
+
+    def show_group(self, group, jobs, files, results):
+        index = self.index
+        ais = set()
+        for job in jobs:
+            ais |= job.ais
+        linked = sum(1 for entry in files if entry.jobs)
+        readme = index.files.get(rel_key(f"{group}/README.md")) if group and group != NO_GROUP else None
+        recent = "".join(f'<li><a href="hub:job/{escape(job.id)}">{escape(job.title)}</a> '
+                         f'<span style="color:#75798F">{fmt_time(job.when)}</span></li>' for job in jobs[:5])
+        html = (f"<p>{ai_badges_html(ais)}</p>"
+                f"<p>작업 {len(jobs)}건 · 파일 {len(files):,}개 · 결과물 {len(results):,}개 · "
+                f"작업과 직접 연결된 파일 {linked:,}개</p>"
+                f"<h3>최근 작업</h3><ul>{recent or '<li>작업 기록 없음</li>'}</ul>"
+                "<p style='color:#75798F'>이 프로젝트의 작업은 그 작업의 파일 목록에 이 프로젝트 폴더의 파일이 "
+                "있다는 뜻이며, 폴더의 모든 파일을 그 AI가 만들었다는 근거는 아님. 결과물은 문서·실행 파일·"
+                "이미지처럼 열어 볼 파일만 모은 것이고 검증·테스트·기록 폴더는 제외.</p>")
+        if readme is not None:
+            html += f"<p>{self.file_link(readme.path, 'README.md 보기')}</p>"
+        path = (index.root / group if group else index.root) if group != NO_GROUP else None
+        self.preview.show_html(group_label(group), escape(str(path)) if path else "", html, path, kind="group")
 
     def show_ai(self, ai):
         index = self.index
