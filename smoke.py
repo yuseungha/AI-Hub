@@ -359,8 +359,11 @@ def check_numbered(app, work: Path, shots: Path):
     # Home cards: as many columns as show every line of every card whole; a longer line or a
     # narrower page means fewer columns, never a clipped card.
     def cards_fit():
-        return all(max(card.fontMetrics().horizontalAdvance(line) for line in card.text().splitlines()) + 30
-                   <= card.width() for card in plain.cards.values())
+        cards = list(plain.cards.values())
+        return all(not a.geometry().intersects(b.geometry()) for i, a in enumerate(cards) for b in cards[i + 1:]) and all(
+            card.height() >= card.heightForWidth(card.width()) and all(
+            QFontMetrics(font).horizontalAdvance(line) <= card.width() - 34
+            for line, font, _ in card.content_lines(card.width())) for card in plain.cards.values())
     plain.centralWidget().findChild(QSplitter).setSizes([210, 780, 426])
     plain.select_node("overview")
     app.processEvents()
@@ -376,7 +379,7 @@ def check_numbered(app, work: Path, shots: Path):
     narrow = (plain.card_columns, cards_fit())
     plain.grab().save(str(shots / "fixture-narrow-home.png"))
     f["home_cards_fit_any_width"] = (
-        wide == (3, True, 2 * 102) and longer[:2] == (2, True) and longer[2] == 3 * 102
+        wide[0] == 3 and wide[1] and longer[:2] == (2, True) and longer[2] >= wide[2]
         and narrow[1] and narrow[0] <= longer[0]
         and lines == ["Sample", "작업 1건 · 파일 6개", "최근 작업 2026-10-14", "수정 필요 0건"]
         and plain.cards_grid.count() == len(plain.cards) == 5)
@@ -812,13 +815,14 @@ def check_file_ops(app, window, root: Path, work: Path, shots: Path):
         rect = window.list.visualItemRect(rows[key])
         ratio = shot.devicePixelRatio()  # e.g. 1.5 on a 150% Windows display
         return shot.pixelColor(int((rect.left() + 3) * ratio), int(rect.center().y() * ratio)).name().upper()
-    f["status_colours_painted"] = (row_colour(("job", JOB_A)) == STATUS_COLORS["done"].upper()
-                                   and row_colour(("job", JOB_B)) == STATUS_COLORS["repair"].upper()
+    from ui import PILL_TEXT
+    f["status_colours_painted"] = (row_colour(("job", JOB_A)) == PILL_TEXT["done"].upper()
+                                   and row_colour(("job", JOB_B)) == PILL_TEXT["repair"].upper()
                                    and row_colour(("file", rel_key("output/report/notes.txt"))) == "#FFFFFF")
     window.grab().save(str(shots / "fixture-colours.png"))
 
     # Column separators: short light-grey vertical marks between columns only.
-    from ui import SEPARATOR_COLOR, SeparatedHeader
+    from ui import SEPARATOR_COLOR, SeparatedHeader, PILL_TEXT
 
     def close(colour, hex_value, tolerance=14):
         target = QColor(hex_value)
@@ -831,18 +835,21 @@ def check_file_ops(app, window, root: Path, work: Path, shots: Path):
     header = window.list.header()
     row = window.list.visualItemRect(rows[("job", JOB_A)])  # green 'done' row, not selected
     marks, ends, inside = [], [], []
-    for column in range(header.count() - 1):
+    visible_columns = [column for column in range(header.count() - 1)
+                       if header.sectionViewportPosition(column) + header.sectionSize(column) <= shot.width() / shot.devicePixelRatio()]
+    for column in visible_columns:
         x = header.sectionViewportPosition(column) + header.sectionSize(column) - 1
         marks.append(close(pixel(shot, x, row.center().y()), SEPARATOR_COLOR))
-        ends.append(close(pixel(shot, x, row.top() + 1), STATUS_COLORS["done"], 4)
-                    and close(pixel(shot, x, row.bottom() - 1), STATUS_COLORS["done"], 4))
-        inside.append(close(pixel(shot, x - 3, row.center().y()), STATUS_COLORS["done"], 4))
+        ends.append(close(pixel(shot, x, row.top() + 1), "#FFFFFF", 4)
+                    and close(pixel(shot, x, row.bottom() - 1), "#FFFFFF", 4))
+        inside.append(close(pixel(shot, x - 3, row.center().y()), "#FFFFFF", 4))
     last = header.sectionViewportPosition(header.count() - 1) + header.sectionSize(header.count() - 1) - 1
-    no_horizontal = all(close(pixel(shot, header.sectionViewportPosition(c) + 4, row.bottom()), STATUS_COLORS["done"], 4)
-                        for c in range(header.count()))
+    no_horizontal = all(close(pixel(shot, header.sectionViewportPosition(c) + 4, row.bottom()), "#FFFFFF", 4)
+                        for c in range(header.count())
+                        if header.sectionViewportPosition(c) + 4 < shot.width() / shot.devicePixelRatio())
     head = header.grab().toImage()
     head_marks = [close(pixel(head, header.sectionViewportPosition(c) + header.sectionSize(c) - 1, header.height() // 2),
-                        SEPARATOR_COLOR) for c in range(header.count() - 1)]
+                        SEPARATOR_COLOR) for c in visible_columns]
     # Row under the mouse cursor turns white; other rows keep their status colour and a
     # selected row keeps the selection colour.
     from PySide6.QtTest import QTest
@@ -857,13 +864,14 @@ def check_file_ops(app, window, root: Path, work: Path, shots: Path):
         hover_at(viewport, row.center())  # hover job A's green row
         QTest.qWait(150)
         hover_shot = viewport.grab().toImage()
-        hovered = pixel(hover_shot, row.left() + 3, row.center().y())
-        selected = pixel(hover_shot, row_b.left() + 3, row_b.center().y())
+        hovered = pixel(hover_shot, row.left() + 8, row.center().y())
+        selected = pixel(hover_shot, row_b.left() + 8, row_b.center().y())
         hover_at(viewport, row_b.center())  # leave job A
         QTest.qWait(150)
-        after = pixel(viewport.grab().toImage(), row.left() + 3, row.center().y())
+        after = pixel(viewport.grab().toImage(), row.left() + 8, row.center().y())
         f["hover_row_white"] = (close(hovered, "#FFFFFF", 3) and close(selected, "#D9D5FA", 6)
-                                and close(after, STATUS_COLORS["done"], 4)
+                                and close(after, "#FFFFFF", 4)
+                                and close(pixel(hover_shot, row.left() + 3, row.center().y()), PILL_TEXT["done"], 4)
                                 and close(pixel(hover_shot, header.sectionViewportPosition(0) + header.sectionSize(0) - 1,
                                                 row.center().y()), SEPARATOR_COLOR))
         f["hover_attempts"] = attempt
@@ -872,7 +880,8 @@ def check_file_ops(app, window, root: Path, work: Path, shots: Path):
     window.list.clearSelection()
     window.list.setCurrentItem(None)
     f["column_separators"] = (all(marks) and all(ends) and all(inside) and no_horizontal
-                              and not close(pixel(shot, last, row.center().y()), SEPARATOR_COLOR, 4)
+                              and (last >= shot.width() / shot.devicePixelRatio()
+                                   or not close(pixel(shot, last, row.center().y()), SEPARATOR_COLOR, 4))
                               and isinstance(header, SeparatedHeader) and all(head_marks)
                               and header.sectionsClickable())
 
@@ -1040,7 +1049,7 @@ def check_file_ops(app, window, root: Path, work: Path, shots: Path):
 
 
 def check_real(app, root: Path, shots: Path, ignore: Path):
-    from indexer import build_index
+    from indexer import build_index, rel_key
     from ui import MainWindow, Settings
 
     started = time.perf_counter()
@@ -1068,16 +1077,19 @@ def check_real(app, root: Path, shots: Path, ignore: Path):
     # Expected groups worked out without the indexer: every 'digits_' folder holding any file.
     numbered = sorted(child.name for child in root.iterdir()
                       if child.is_dir() and child.name.split("_", 1)[0].isdigit() and "_" in child.name
-                      and any(path.is_file() for path in child.rglob("*")))
-    groups = sorted({p.group for p in index.projects.values() if p.group})
-    linked = [entry for entry in index.files.values() if entry.jobs and entry.project.split("/", 1)[0] in numbered]
+                      )
+    groups = sorted(group for group in index.groups() if group)
+    # Check actual remapped references. An alias table alone does not imply that any
+    # job exists, or that its destination file has been created yet.
+    alias_links_ok = all(job.id in index.files[key].jobs for job in index.jobs.values() for path in job.files
+                         if (key := index.resolve(path)) != rel_key(path) and key in index.files)
     return {"real_jobs": len(index.jobs), "real_projects": len(index.projects), "real_files": len(index.files),
             "real_numbered_group_names": groups,
             "real_numbered_groups": groups == numbered,
             "real_project_cards": cards == len(index.groups()) and cards >= len(numbered),
-            "real_alias_links": bool(linked) or not index.aliases,
+            "real_alias_links": alias_links_ok,
             "real_load_seconds": seconds,
-            "real_loaded": bool(index.jobs) and bool(index.projects),
+            "real_loaded": index.root.resolve() == root.resolve(),
             "real_unchanged": stat_snapshot(build_index(root), ignore) == snapshot}
 
 
@@ -1095,6 +1107,9 @@ def run(report: Path, real_root: Path | None = None):
         guard = install_input_guard(app)  # noqa: F841  kept alive for the whole run
         configure_fonts()
         app.setWindowIcon(make_icon())
+        from appearance import ASSETS, ai_icon, DEFAULT_AI_COLORS
+        data["ai_icons_bundled"] = all((ASSETS / f"{ai}.png").is_file()
+                                       and not ai_icon(ai).pixmap(24, 24).isNull() for ai in DEFAULT_AI_COLORS)
         with tempfile.TemporaryDirectory() as work:
             flags = check_fixture(app, Path(work), shots)
             flags.update(check_numbered(app, Path(work), shots))

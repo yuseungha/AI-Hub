@@ -21,7 +21,11 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QLabel, QTextBrowser, QPlainTextEdit, QStackedWidget, QScrollArea,
     QFileDialog, QCheckBox, QHeaderView, QMessageBox, QApplication, QFrame, QMenu, QAbstractItemView,
-    QStyledItemDelegate, QStyle, QSizePolicy, QListWidget, QListWidgetItem, QListView, QTabBar, QGridLayout)
+    QStyledItemDelegate, QStyle, QSizePolicy, QListWidget, QListWidgetItem, QListView, QTabBar, QGridLayout,
+    QDialog, QDialogButtonBox, QColorDialog, QStyleOptionViewItem, QStyleOptionButton)
+
+from appearance import (DEFAULT_AI_COLORS, DOCUMENT_STYLE, ai_icon, icon_html,
+                        load_ai_colors, text_color, swatch_text_color)
 
 import chatgpt
 import fileops
@@ -31,13 +35,14 @@ from indexer import (AIS, UNKNOWN, AI_LABELS, ACTION_LABELS, STATUS_LABELS, STAL
 from preview import build_preview, can_open_externally, human_size
 
 PURPLE = "#635BDF"
-AI_COLORS = {"codex": "#2563EB", "claude": "#C2410C", "chatgpt": "#0E8A6A", UNKNOWN: "#7A7F93", "local": "#7A7F93"}
+AI_COLORS = DEFAULT_AI_COLORS
 ROLE = Qt.ItemDataRole.UserRole
 SORT_ROLE = int(Qt.ItemDataRole.UserRole) + 1  # numeric sort key per column
 KEY_ROLE = int(Qt.ItemDataRole.UserRole) + 2  # tree node key, used to restore selection
 GROUP_ROLE = int(Qt.ItemDataRole.UserRole) + 3  # status colour group of a list row
 GROUP_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 4  # project group of a folder-tab row
 CARD_ROLE = int(Qt.ItemDataRole.UserRole) + 5  # status, roles and counts drawn on a job card
+AI_ROLE = int(Qt.ItemDataRole.UserRole) + 6
 COLUMNS = ["종류", "이름", "AI", "상태", "크기", "날짜"]
 SIZE_COLUMN, DATE_COLUMN = 4, 5
 STALE_LABELS = {90: "90일 이상", 180: "180일 이상", 365: "1년 이상"}
@@ -60,30 +65,40 @@ class SortItem(QTreeWidgetItem):
 STYLE = """
 QMainWindow, QWidget#central { background: #F6F6FA; }
 QFrame#toolbar { background: white; border-bottom: 1px solid #E6E5EF; }
-QLabel#brand { color: #2B2A3A; font-size: 15px; font-weight: 700; }
-QLabel#rootLabel { color: #75798F; }
+QWidget { font-size: 10pt; }
+QLabel#brand { color: #2B2A3A; font-size: 12pt; font-weight: 700; }
+QLabel#rootLabel { color: #676B80; font-size: 9pt; font-family: 'Segoe UI'; }
 QLineEdit { background: #F6F6FA; border: 1px solid #E1E0EA; border-radius: 8px; padding: 7px 10px; }
 QLineEdit:focus { border-color: #7B72E8; background: white; }
-QPushButton { background: white; border: 1px solid #E1E0EA; border-radius: 8px; padding: 7px 12px; color: #3B3A4E; }
+QPushButton { background: white; border: 1px solid #E1E0EA; border-radius: 8px; padding: 6px 14px; min-height: 20px; color: #3B3A4E; }
 QPushButton:hover { background: #F1F0FB; border-color: #CFCBF3; }
+QPushButton:focus { border: 1px solid #635BDF; }
+QPushButton:pressed { background: #E9E7FB; }
 QPushButton:disabled { color: #A9ABBB; }
 QPushButton#primary { background: #635BDF; color: white; border-color: #635BDF; font-weight: 700; }
 QTreeWidget { background: white; border: 1px solid #E6E5EF; border-radius: 10px; padding: 4px; outline: none; }
-QTreeWidget::item { padding: 5px 4px; border-radius: 6px; }
+QTreeWidget::item { padding: 7px 8px; border-radius: 6px; }
 QTreeWidget::item:hover { background: #F1F0FB; }
 QTreeWidget::item:selected { background: #E9E7FB; color: #2B2A3A; }
 QTreeWidget#itemList::item { border-radius: 0; }
+QTreeWidget#itemList { font-size: 9pt; }
 QTreeWidget#itemList::item:hover { background: #FFFFFF; }
 QTreeWidget#itemList::item:selected { background: #D9D5FA; color: #1F1D33; }
-QLabel#legendChip { color: #3B3A4E; border-radius: 6px; padding: 2px 8px; font-size: 11px; }
-QLabel#legendTitle { color: #75798F; font-size: 11px; }
-QHeaderView::section { background: white; border: none; border-bottom: 1px solid #ECEBF3; padding: 6px; color: #75798F; font-weight: 600; }
+QLabel#legendChip { color: #3B3A4E; border-radius: 6px; padding: 3px 10px; font-size: 9pt; }
+QLabel#legendTitle { color: #676B80; font-size: 9pt; }
+QHeaderView::section { background: white; border: none; border-bottom: 1px solid #ECEBF3; padding: 8px; color: #676B80; font-size: 9pt; font-weight: 600; }
 QTextBrowser, QPlainTextEdit, QScrollArea { background: white; border: 1px solid #E6E5EF; border-radius: 10px; }
-QLabel#previewTitle { font-size: 14px; font-weight: 700; color: #2B2A3A; }
-QLabel#previewMeta { color: #75798F; }
-QSplitter::handle { background: transparent; width: 6px; }
-QStatusBar { color: #75798F; }
-QTreeWidget#nav { background: transparent; border: none; padding: 0; font-size: 13px; show-decoration-selected: 1; }
+QWidget#previewCard { background: white; border: 1px solid #E6E5EF; border-radius: 12px; }
+QWidget#previewCard QTextBrowser, QWidget#previewCard QPlainTextEdit,
+QWidget#previewCard QScrollArea { border: none; border-radius: 0; background: white; }
+QLabel#previewTitle { font-size: 12pt; font-weight: 700; color: #2B2A3A; }
+QLabel#previewMeta { color: #676B80; font-size: 9pt; font-family: 'Segoe UI', 'Malgun Gothic'; }
+QLabel#safetyNote { color: #676B80; font-size: 9pt; }
+QFrame#previewRule { border: none; background: #ECEBF3; min-height: 1px; max-height: 1px; }
+QSplitter::handle { background: transparent; width: 8px; }
+QSplitter::handle:hover { background: #E1E0EA; }
+QStatusBar { color: #676B80; font-size: 9pt; }
+QTreeWidget#nav { background: transparent; border: none; padding: 0; font-size: 10pt; show-decoration-selected: 1; }
 QTreeWidget#nav::branch:selected { background: #E3E0FB; }
 QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
 QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
@@ -91,36 +106,37 @@ QScrollBar::handle { background: #D3D2E0; border-radius: 3px; min-height: 28px; 
 QScrollBar::handle:hover { background: #B9B7CC; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
-QTreeWidget#nav::item { padding: 7px 6px; border-radius: 0; }
+QTreeWidget#nav::item { padding: 8px 8px; border-radius: 0; }
 QTreeWidget#folderTree { show-decoration-selected: 1; }
 QTreeWidget#folderTree::item { border-radius: 0; }
 QTreeWidget#folderTree::branch:selected { background: #E9E7FB; }
 QTreeWidget#nav::item:hover { background: #ECEBF6; }
 QTreeWidget#nav::item:selected { background: #E3E0FB; color: #2B2A3A; }
-QLabel#pageTitle { font-size: 20px; font-weight: 700; color: #2B2A3A; }
-QLabel#pageMeta { color: #75798F; }
+QLabel#pageTitle { font-size: 16pt; font-weight: 700; color: #2B2A3A; }
+QLabel#pageMeta { color: #676B80; font-size: 9pt; }
 QLabel#sectionLabel { color: #3B3A4E; font-weight: 700; padding-top: 4px; }
 QScrollArea#cards, QWidget#cardsBox { background: transparent; border: none; }
 QPushButton#projectCard { background: white; border: 1px solid #E6E5EF; border-radius: 10px;
-    padding: 10px 14px; text-align: left; color: #3B3A4E; min-height: 70px; }
+    padding: 14px 16px; text-align: left; color: #3B3A4E; min-height: 78px; }
 QPushButton#projectCard:hover { background: #F4F3FD; border-color: #A9A2F0; }
 QListWidget#jobList { background: transparent; border: none; outline: none; }
 QListWidget#jobList::item { background: transparent; border: none; }
 QTabBar#groupTabs::tab { background: transparent; border: none; border-bottom: 2px solid transparent;
-    padding: 6px 2px; margin-right: 18px; color: #75798F; }
+    padding: 6px 2px; margin-right: 18px; color: #676B80; }
 QTabBar#groupTabs::tab:selected { color: #2B2A3A; border-bottom-color: #635BDF; font-weight: 700; }
 QTabBar#groupTabs::tab:hover { color: #2B2A3A; }
 """
 
 
-def ai_badges_html(ais, roles=None):
+def ai_badges_html(ais, roles=None, colors=None):
+    colors = colors or AI_COLORS
     parts = []
     for ai in sorted(ais, key=lambda key: (list(AI_COLORS).index(key) if key in AI_COLORS else 9)):
         label = AI_LABELS.get(ai, ai)
         if roles and roles.get(ai):
             label += " · " + ", ".join(roles[ai])
-        parts.append(f'<span style="background:{AI_COLORS.get(ai, "#7A7F93")};color:white;'
-                     f'padding:2px 6px;border-radius:4px;">&nbsp;{escape(label)}&nbsp;</span>')
+        parts.append(f'{icon_html(ai)}<span style="color:{text_color(colors.get(ai, "#7A7F93"))};'
+                     f'font-weight:600;">{escape(label)}</span>')
     return " ".join(parts) if parts else '<span style="color:#7A7F93">미분류 · 작업 기록 없음</span>'
 
 
@@ -134,7 +150,7 @@ def fmt_time(value):
     return value.strftime("%Y-%m-%d %H:%M") if value else ""
 
 
-DEFAULT_COLUMN_WIDTHS = (48, 180, 96, 120, 72, 118)  # fits the default list pane
+DEFAULT_COLUMN_WIDTHS = (48, 160, 110, 110, 64, 110)
 MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH = 36, 2000  # drag limits; saved widths are clamped the same way
 STATUS_GROUPS = {"completed": "done", "reviewed": "done", "passed": "done", "completed_unverified": "done",
                  "active": "active", "checked": "checked", "needs_repair": "repair"}
@@ -145,20 +161,72 @@ STATUS_LEGEND = (("done", "완료"), ("active", "진행 중"), ("checked", "검�
 
 
 class StatusDelegate(QStyledItemDelegate):
-    """Paints the status colour behind each cell of a row. Item background brushes are
-    ignored once the list has a QTreeWidget::item style sheet rule, so the colour is
-    drawn here; hover and selection from the style sheet still paint on top."""
+    """Neutral rows, persistent status markers and AI identities with original icons."""
 
     def paint(self, painter, option, index):
         group = index.siblingAtColumn(0).data(GROUP_ROLE)
-        # The row under the mouse cursor stays white (style sheet hover rule) so the
-        # cursor position stands out; selected rows keep the selection colour.
-        plain = option.state & (QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_MouseOver)
-        if group and not plain:
-            painter.fillRect(option.rect, QColor(STATUS_COLORS[group]))
-        super().paint(painter, option, index)
+        custom = index.column() == 2 or (index.column() == 3 and group)
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        if custom:
+            opt.text = ""
+            opt.icon = ai_icon("")
+            option.widget.style().drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, option.widget)
+        else:
+            super().paint(painter, option, index)
+        painter.save()
+        if group and index.column() == 0:
+            painter.fillRect(QRect(option.rect.left(), option.rect.top() + 4, 4, option.rect.height() - 8),
+                             QColor(PILL_TEXT[group]))
+        if index.column() == 3 and group:
+            rect = option.rect.adjusted(8, 4, -8, -4)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(STATUS_COLORS[group]))
+            painter.drawRoundedRect(QRectF(rect), 6, 6)
+            painter.setFont(option.font)
+            painter.setPen(QColor(PILL_TEXT[group]))
+            label = index.data() or ""
+            if index.siblingAtColumn(0).data(ROLE)[0] == "job":
+                label = dict(STATUS_LEGEND)[group]
+            text = option.fontMetrics.elidedText(label, Qt.TextElideMode.ElideRight, rect.width() - 12)
+            painter.drawText(rect.adjusted(6, 0, -6, 0), Qt.AlignmentFlag.AlignVCenter, text)
+        elif index.column() == 2:
+            colors = self.parent().window().ai_colors
+            ais = index.siblingAtColumn(0).data(AI_ROLE) or []
+            left = option.rect.left() + 8
+            for ai in ais:
+                if left + 18 > option.rect.right() - 4:
+                    break
+                ai_icon(ai).paint(painter, QRect(left, option.rect.center().y() - 9, 18, 18))
+                left += 24
+            painter.setFont(option.font)
+            painter.setPen(QColor(text_color(colors.get(ais[0], "#7A7F93")) if ais else "#676B80"))
+            rect = QRect(left, option.rect.top(), max(0, option.rect.right() - left - 8), option.rect.height())
+            label = "" if len(ais) > 1 else (index.data() or "")
+            text = option.fontMetrics.elidedText(label, Qt.TextElideMode.ElideRight, rect.width())
+            painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter, text)
+        painter.restore()
         if index.column() < index.model().columnCount() - 1:
             draw_column_separator(painter, option.rect)
+
+
+class FileList(QTreeWidget):
+    """Empty-state copy is an overlay, so it never becomes a selectable file row."""
+    resized = Signal()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.empty_label = QLabel("표시할 항목이 없습니다\n다른 프로젝트나 검색어를 선택해 보세요.", self.viewport())
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_label.setWordWrap(True)
+        self.empty_label.setStyleSheet("color:#676B80; padding:24px; background:white;")
+        self.empty_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.empty_label.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.empty_label.setGeometry(self.viewport().rect())
+        self.resized.emit()
 
 
 SEPARATOR_COLOR = "#D5D5DE"
@@ -216,9 +284,25 @@ def direct_files_project(key):
 
 TABS = ("jobs", "results", "folders")  # tabs of a project page
 RECENT_JOBS = 30
-CARD_COLUMNS, CARD_PADDING = 3, 30  # fewer columns when the page is narrow, so no card line is clipped
-CARD_ROWS_SHOWN, CARD_HEIGHT = 3, 102  # more rows scroll inside the card area
+CARD_COLUMNS, CARD_PADDING = 3, 40
+CARD_ROWS_SHOWN, CARD_HEIGHT = 3, 128
 PILL_TEXT = {"done": "#1E7B3A", "active": "#8A6100", "checked": "#1F5FAE", "repair": "#B42318", "unknown": "#5B5E70"}
+
+
+def continue_request(job):
+    """What to paste into a Claude or Codex chat to pick a job up again. The job folder holds the
+    request, goal, acceptance and stage logs, so the path is enough; the rest says where it stopped."""
+    lines = [f"`{job.path}` 의 agent_lab 작업 기록(task.json·manifest.json·단계별 로그)을 읽고 이어서 진행해줘. "
+             f"작업 ID: {job.id}",
+             f"현재 상태: {status_text(job)}"]
+    request = next((line.strip() for line in (job.request or "").splitlines() if line.strip()), "")
+    if request:
+        lines.append("요청: " + (request if len(request) <= 120 else request[:119] + "…"))
+    if status_group(job) == "repair":
+        lines.append("마지막 검토에서 수정 필요로 끝났으니 지적된 부분부터 고쳐줘.")
+    elif status_group(job) == "active":
+        lines.append("마지막으로 끝난 단계 다음부터 이어서 해줘.")
+    return "\n".join(lines)
 
 
 def roles_text(job):
@@ -235,6 +319,35 @@ class CardsArea(QScrollArea):
         self.resized.emit()
 
 
+class ProjectCard(QPushButton):
+    """Native button with wrapping, measured content instead of clipped multiline text."""
+    def content_lines(self, width):
+        result = []
+        for position, text in enumerate(self.text().splitlines()):
+            font = QFont(self.font())
+            font.setBold(position == 0)
+            font.setPointSizeF(10 if position == 0 else 9)
+            for line in JobCardDelegate.wrap(text, font, max(40, width - 36), max(40, width - 36)):
+                result.append((line, font, QFontMetrics(font).lineSpacing() + 4))
+        return result
+
+    def heightForWidth(self, width):
+        return max(CARD_HEIGHT, 32 + sum(height for _, _, height in self.content_lines(width)))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.text = ""
+        self.style().drawControl(QStyle.ControlElement.CE_PushButton, option, painter, self)
+        top = 16
+        for position, (line, font, height) in enumerate(self.content_lines(self.width())):
+            painter.setFont(font)
+            painter.setPen(QColor("#2B2A3A" if position == 0 else "#676B80"))
+            painter.drawText(QRect(18, top, max(0, self.width() - 36), height), Qt.AlignmentFlag.AlignVCenter, line)
+            top += height
+
+
 class JobList(QListWidget):
     """Card heights depend on the width (titles and details wrap), so every width change
     lays the rows out again; otherwise taller cards would overlap the rows below."""
@@ -244,13 +357,16 @@ class JobList(QListWidget):
         self.doItemsLayout()
 
 
+CARD_KINDS = ("job",)  # list rows drawn as cards; any other kind is a plain group heading
+
+
 class JobCardDelegate(QStyledItemDelegate):
     """Job rows as cards: the whole title wrapped over as many lines as it needs, then a status
     pill with the AI roles, file count and project. Date rows are plain group headings."""
-    HEADER, PAD, GAP, PILL = 30, 10, 6, 20
+    HEADER, PAD, GAP, PILL = 34, 16, 10, 24
 
     def title_width(self):
-        return max(120, self.parent().viewport().width() - 2 * self.PAD - 6)
+        return max(80, self.parent().viewport().width() - 2 * self.PAD - 32)
 
     @staticmethod
     def wrap(text, font, first_width, width):
@@ -295,7 +411,9 @@ class JobCardDelegate(QStyledItemDelegate):
         return self.wrap(info.get("meta", ""), self.small_font(font), first, width)
 
     def sizeHint(self, option, index):
-        if (index.data(ROLE) or ("",))[0] != "job":
+        if (index.data(ROLE) or ("",))[0] == "empty":
+            return QSize(0, 112)
+        if (index.data(ROLE) or ("",))[0] not in CARD_KINDS:
             return QSize(0, self.HEADER)
         lines = len(self.title_lines(option.font, index.data(Qt.ItemDataRole.DisplayRole) or ""))
         extra = len(self.meta_lines(option.font, index.data(CARD_ROLE) or {})) - 1
@@ -307,8 +425,15 @@ class JobCardDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setFont(option.font)
-        if (index.data(ROLE) or ("",))[0] != "job":
-            painter.setPen(QColor("#75798F"))
+        if (index.data(ROLE) or ("",))[0] not in CARD_KINDS:
+            painter.setPen(QColor("#676B80"))
+            if (index.data(ROLE) or ("",))[0] == "empty":
+                # A specific empty message (a status filter, the unlinked list) replaces the default one.
+                message = text if text and text != "작업 기록 없음" else "아직 작업 기록이 없습니다\n다른 프로젝트를 선택해 보세요."
+                painter.drawText(option.rect.adjusted(16, 16, -16, -16),
+                                 Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, message)
+                painter.restore()
+                return
             painter.drawText(option.rect.adjusted(6, 0, 0, -5),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, text)
             painter.restore()
@@ -322,6 +447,14 @@ class JobCardDelegate(QStyledItemDelegate):
         metrics = option.fontMetrics
         width = self.title_width()
         left, top = option.rect.left() + self.PAD + 2, option.rect.top() + 3 + self.PAD
+        ais = index.data(AI_ROLE) or []
+        if ais:
+            colors = self.parent().window().ai_colors
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(colors.get(ais[0], "#7A7F93")))
+            painter.drawRoundedRect(QRectF(card.left(), card.top() + 12, 3, card.height() - 24), 1.5, 1.5)
+            ai_icon(ais[0]).paint(painter, QRect(left, top + 1, 20, 20))
+            left += 28
         painter.setPen(QColor("#2B2A3A"))
         flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         bottom = top
@@ -340,7 +473,7 @@ class JobCardDelegate(QStyledItemDelegate):
         painter.drawRoundedRect(pill, self.PILL / 2, self.PILL / 2)
         painter.setPen(QColor(PILL_TEXT[group]))
         painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, status)
-        painter.setPen(QColor("#75798F"))
+        painter.setPen(QColor("#676B80"))
         meta = self.meta_lines(option.font, info)
         meta_left = int(pill.right()) + 8
         painter.drawText(QRect(meta_left, int(pill.top()), left + width + 4 - meta_left, self.PILL), flags, meta[0])
@@ -378,20 +511,101 @@ class ImageView(QScrollArea):
         self.rescale()
 
 
+class ElidedLabel(QLabel):
+    """Long root paths must never determine the toolbar's minimum width."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.full_text = ""
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def setText(self, text):
+        self.full_text = text
+        self.setToolTip(text)
+        self.refresh_text()
+
+    def refresh_text(self):
+        super().setText(self.fontMetrics().elidedText(self.full_text, Qt.TextElideMode.ElideMiddle, self.width()))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.refresh_text()
+
+
+class AppearanceDialog(QDialog):
+    def __init__(self, colors, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("AI 색상 설정")
+        self.colors = dict(colors)
+        self.setMinimumWidth(380)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+        layout.addWidget(QLabel("AI별 강조색", objectName="previewTitle"))
+        note = QLabel("이름·배지·강조선에 적용합니다. 아이콘 원본과 작업 상태 색은 유지합니다.", wordWrap=True)
+        layout.addWidget(note)
+        self.swatches = {}
+        for ai in DEFAULT_AI_COLORS:
+            row = QHBoxLayout()
+            mark = QLabel()
+            mark.setPixmap(ai_icon(ai).pixmap(24, 24))
+            row.addWidget(mark)
+            row.addWidget(QLabel(AI_LABELS.get(ai, "로컬")), 1)
+            button = QPushButton()
+            button.clicked.connect(lambda checked=False, ai=ai: self.pick_color(ai))
+            row.addWidget(button)
+            self.swatches[ai] = button
+            layout.addLayout(row)
+        reset = QPushButton("기본색으로 복원")
+        reset.clicked.connect(self.reset_colors)
+        layout.addWidget(reset, 0, Qt.AlignmentFlag.AlignLeft)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("저장")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.refresh_swatches()
+
+    def refresh_swatches(self):
+        for ai, button in self.swatches.items():
+            color = self.colors[ai]
+            button.setText(color.upper())
+            button.setStyleSheet(f"background: {color}; color: {swatch_text_color(color)};")
+            button.setAccessibleName(f"{AI_LABELS.get(ai, '로컬')} 색상 {color}")
+
+    def pick_color(self, ai):
+        value = QColorDialog.getColor(QColor(self.colors[ai]), self, f"{AI_LABELS.get(ai, '로컬')} 강조색")
+        if value.isValid():
+            self.colors[ai] = value.name().upper()
+            self.refresh_swatches()
+
+    def reset_colors(self):
+        self.colors = dict(DEFAULT_AI_COLORS)
+        self.refresh_swatches()
+
+
 class PreviewPane(QWidget):
     def __init__(self, window):
         super().__init__()
         self.window = window
         self.path = None
         self.kind = ""
+        self.setObjectName("previewCard")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(0)
         self.title = QLabel("항목을 선택하세요", objectName="previewTitle", wordWrap=True)
+        self.title.setTextFormat(Qt.TextFormat.PlainText)
         self.meta = QLabel("", objectName="previewMeta", wordWrap=True, textFormat=Qt.TextFormat.RichText)
         self.meta.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
         self.meta.linkActivated.connect(window.open_link)
+        for label in (self.title, self.meta):
+            label.setMinimumWidth(0)
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         self.open_button = QPushButton("기본 앱으로 열기")
         self.folder_button = QPushButton("폴더 열기")
         self.open_button.clicked.connect(self.open_external)
@@ -401,25 +615,42 @@ class PreviewPane(QWidget):
         buttons.addStretch()
         self.stack = QStackedWidget()
         self.browser = QTextBrowser()
+        self.browser.document().setDefaultStyleSheet(DOCUMENT_STYLE)
+        self.browser.document().setDocumentMargin(0)
+        self.browser.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         self.browser.setOpenLinks(False)
         self.browser.anchorClicked.connect(lambda url: window.open_link(url.toString()))
         self.code = QPlainTextEdit(readOnly=True)
         self.code.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.code.setFont(QFont("Consolas", 10))
+        self.code.document().setDocumentMargin(12)
         self.image = ImageView()
         for widget in (self.browser, self.code, self.image):
             self.stack.addWidget(widget)
         layout.addWidget(self.title)
+        layout.addSpacing(4)
         layout.addWidget(self.meta)
+        layout.addSpacing(10)
         layout.addLayout(buttons)
+        layout.addSpacing(12)
+        rule = QFrame(objectName="previewRule")
+        layout.addWidget(rule)
+        layout.addSpacing(12)
         layout.addWidget(self.stack, 1)
+        layout.addSpacing(12)
+        self.safety_note = QLabel("둘러보기는 파일을 변경하지 않습니다.\n파일 관리는 목록의 우클릭 메뉴에서 확인 후 실행합니다.",
+                                 objectName="safetyNote", wordWrap=True)
+        self.safety_note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        layout.addWidget(self.safety_note)
         self.set_path(None)
 
     def set_path(self, path):
         self.path = Path(path) if path else None
+        self.open_button.setVisible(bool(self.path and self.path.is_file()))
         self.open_button.setEnabled(bool(self.path and self.path.is_file() and can_open_externally(self.path)))
         self.open_button.setToolTip("" if self.open_button.isEnabled() else "실행 파일·스크립트는 열지 않음")
         self.folder_button.setEnabled(bool(self.path and self.path.exists()))
+        self.folder_button.setVisible(bool(self.path and self.path.exists()))
 
     def open_external(self):
         if self.path and self.path.is_file() and can_open_externally(self.path):
@@ -435,6 +666,7 @@ class PreviewPane(QWidget):
         self.title.setText(title)
         self.meta.setText(meta)
         self.browser.setHtml(html)
+        self.browser.document().setDocumentMargin(0)
         self.stack.setCurrentWidget(self.browser)
         self.set_path(path)
 
@@ -448,6 +680,7 @@ class PreviewPane(QWidget):
         if result.kind == "markdown":
             self.browser.setSearchPaths([str(entry_path.parent)])
             self.browser.setMarkdown(result.text)
+            self.browser.document().setDocumentMargin(0)
             self.stack.setCurrentWidget(self.browser)
         elif result.kind == "image":
             if not self.image.show_image(entry_path):
@@ -457,8 +690,11 @@ class PreviewPane(QWidget):
             self.code.setPlainText(result.text or result.note)
             self.stack.setCurrentWidget(self.code)
         else:
-            self.browser.setHtml(f'<p style="color:#75798F">{escape(result.note or "미리보기 없음")}</p>')
+            self.browser.setHtml(f'<p align="center" style="margin-top:32px;color:#676B80">'
+                                 f'{escape(result.note or "미리보기 없음")}</p>'
+                                 '<p align="center" style="color:#676B80">다른 항목을 선택해 내용을 확인하세요.</p>')
             self.stack.setCurrentWidget(self.browser)
+        self.browser.document().setDocumentMargin(0)
         return result
 
 
@@ -466,13 +702,18 @@ class MainWindow(QMainWindow):
     def __init__(self, root=None, settings=None):
         super().__init__()
         self.settings = settings
+        self.ai_colors = load_ai_colors((settings or {}).get("ai_colors"))
+        self.custom_columns = self.saved_column_widths() is not None
+        self.adjusting_columns = False
         self.root = Path(root) if root else None
         self.index: Index | None = None
         self.conversations: list[chatgpt.Conversation] = []
         self.export_path = None
         self.current_node = None
         self.setWindowTitle("AI 작업 허브")
-        self.resize(1440, 860)
+        available = self.screen().availableGeometry()
+        self.setMinimumSize(min(940, available.width()), min(600, max(360, available.height() - 48)))
+        self.resize(min(1440, int(available.width() * .94)), min(900, int(available.height() * .90)))
         self.setStyleSheet(STYLE)
 
         central = QWidget(objectName="central")
@@ -482,41 +723,56 @@ class MainWindow(QMainWindow):
         outer.setSpacing(0)
 
         bar = QFrame(objectName="toolbar")
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(16, 10, 16, 10)
+        toolbar_layout = QVBoxLayout(bar)
+        toolbar_layout.setContentsMargins(16, 12, 16, 12)
+        toolbar_layout.setSpacing(10)
+        row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(QLabel("AI 작업 허브", objectName="brand"))
-        self.root_label = QLabel("", objectName="rootLabel")
-        self.root_label.setMinimumWidth(80)
+        self.root_label = ElidedLabel("", objectName="rootLabel")
         row.addWidget(self.root_label, 1)
         self.search = QLineEdit(placeholderText="프로젝트·작업·파일 검색 (Enter: 내용까지)")
         self.search.setClearButtonEnabled(True)
-        self.search.setMinimumWidth(320)
+        self.search.setMinimumWidth(200)
         self.search.textChanged.connect(self.on_search_text)
         self.search.returnPressed.connect(self.run_search)
         self.content_check = QCheckBox("파일 내용 포함")
         self.root_button = QPushButton("폴더 선택")
         self.refresh_button = QPushButton("새로고침")
         self.export_button = QPushButton("ChatGPT 내보내기 열기")
+        self.export_button.setIcon(ai_icon("chatgpt"))
+        self.appearance_button = QPushButton("AI 색상")
+        self.appearance_button.clicked.connect(self.choose_appearance)
         self.root_button.clicked.connect(self.choose_root)
         self.refresh_button.clicked.connect(self.reload)
         self.export_button.clicked.connect(self.choose_export)
-        for widget in (self.search, self.content_check, self.export_button, self.root_button, self.refresh_button):
+        for widget in (self.root_button, self.refresh_button, self.appearance_button):
             row.addWidget(widget)
+        toolbar_layout.addLayout(row)
+        search_row = QHBoxLayout()
+        search_row.setSpacing(12)
+        search_row.addWidget(self.search, 1)
+        search_row.addWidget(self.content_check)
+        search_row.addWidget(self.export_button)
+        toolbar_layout.addLayout(search_row)
         outer.addWidget(bar)
 
         splitter = QSplitter()
-        splitter.setContentsMargins(12, 12, 12, 0)
+        self.splitter = splitter
+        splitter.setContentsMargins(16, 16, 16, 8)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
         self.tree = QTreeWidget(objectName="nav")
         self.tree.setHeaderHidden(True)
         self.tree.setIndentation(14)
-        self.tree.setMinimumWidth(190)
+        self.tree.setMinimumWidth(176)
+        self.tree.setIconSize(QSize(20, 20))
         self.tree.currentItemChanged.connect(self.on_tree)
         self.tree.itemClicked.connect(self.on_nav_clicked)
         self.folder_tree = QTreeWidget(objectName="folderTree")
         self.folder_tree.setHeaderHidden(True)
         self.folder_tree.currentItemChanged.connect(self.on_folder_tree)
-        self.list = QTreeWidget(objectName="itemList")
+        self.list = FileList(objectName="itemList")
         self.list.setRootIsDecorated(False)
         separated = SeparatedHeader(Qt.Orientation.Horizontal, self.list)
         separated.setSectionsClickable(True)  # a fresh QHeaderView is not clickable; sorting needs it
@@ -540,7 +796,8 @@ class MainWindow(QMainWindow):
         self.list.headerItem().setTextAlignment(SIZE_COLUMN, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.column_timer = QTimer(self, singleShot=True, interval=400)
         self.column_timer.timeout.connect(self.save_column_widths)
-        header.sectionResized.connect(lambda *_: self.column_timer.start())
+        header.sectionResized.connect(self.on_column_resized)
+        self.list.resized.connect(self.fit_default_columns)
         self.list.currentItemChanged.connect(self.on_list)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self.show_list_menu)
@@ -564,18 +821,21 @@ class MainWindow(QMainWindow):
         self.files_box = QWidget()
         files_layout = QVBoxLayout(self.files_box)
         files_layout.setContentsMargins(0, 0, 0, 0)
-        files_layout.setSpacing(6)
-        legend = QHBoxLayout()
-        legend.setSpacing(4)
-        legend.addWidget(QLabel("상태", objectName="legendTitle"))
+        files_layout.setSpacing(10)
+        self.legend_widget = QWidget()
+        self.legend_layout = QHBoxLayout(self.legend_widget)
+        self.legend_layout.setContentsMargins(0, 0, 0, 0)
+        self.legend_layout.setSpacing(6)
+        self.legend_layout.addWidget(QLabel("상태", objectName="legendTitle"))
         self.legend_chips = {}
         for group, label in STATUS_LEGEND:
             chip = QLabel(label, objectName="legendChip")
             chip.setStyleSheet(f"background: {STATUS_COLORS[group]};")
-            legend.addWidget(chip)
+            chip.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            self.legend_layout.addWidget(chip)
             self.legend_chips[group] = chip
-        legend.addStretch()
-        files_layout.addLayout(legend)
+        self.legend_layout.addStretch(1)
+        files_layout.addWidget(self.legend_widget)
         self.files_split = QSplitter()
         self.files_split.addWidget(self.folder_tree)
         self.files_split.addWidget(self.list)
@@ -587,14 +847,19 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.files_box)
 
         center = QWidget(objectName="center")
+        self.center = center
         center_layout = QVBoxLayout(center)
-        center_layout.setContentsMargins(6, 0, 6, 0)
-        center_layout.setSpacing(8)
+        center_layout.setContentsMargins(8, 0, 8, 0)
+        center_layout.setSpacing(12)
+        center.setMinimumWidth(300)
+        self.preview.setMinimumWidth(340)
         head = QHBoxLayout()
         titles = QVBoxLayout()
         titles.setSpacing(2)
-        self.page_title = QLabel("", objectName="pageTitle")
+        self.page_title = QLabel("", objectName="pageTitle", wordWrap=True)
         self.page_meta = QLabel("", objectName="pageMeta", wordWrap=True)
+        for label in (self.page_title, self.page_meta):
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         titles.addWidget(self.page_title)
         titles.addWidget(self.page_meta)
         head.addLayout(titles, 1)
@@ -627,7 +892,9 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.tree)
         splitter.addWidget(center)
         splitter.addWidget(self.preview)
-        splitter.setSizes([210, 780, 426])
+        splitter.setSizes([200, 720, 480])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 3)
         splitter.setStretchFactor(2, 1)
         outer.addWidget(splitter, 1)
         QShortcut(QKeySequence("Ctrl+F"), self, self.search.setFocus)
@@ -639,6 +906,64 @@ class MainWindow(QMainWindow):
             self.reload()
         else:
             self.root_label.setText("작업 폴더를 선택하세요 (agent_lab이 있는 폴더)")
+            self.preview.show_html("시작할 준비가 되었습니다", "",
+                                   '<h3>작업 폴더를 선택하세요</h3><p>상단의 폴더 선택을 누르면 프로젝트와 결과물을 볼 수 있습니다.</p>')
+        self.root_button.setObjectName("primary" if not self.root else "")
+
+    def ai_badges_html(self, ais, roles=None):
+        return ai_badges_html(ais, roles, self.ai_colors)
+
+    def choose_appearance(self):
+        dialog = AppearanceDialog(self.ai_colors, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.apply_ai_colors(dialog.colors)
+
+    def apply_ai_colors(self, colors):
+        selected = self.list.currentItem()
+        selected_data = selected.data(0, ROLE) if selected else None
+        preview_kind, preview_path = self.preview.kind, self.preview.path
+        selected_job = self.current_job if preview_kind == "job" else None
+        show_phases = self.show_phases
+        self.ai_colors = load_ai_colors(colors)
+        if self.settings is not None:
+            saved = self.settings.update(ai_colors=self.ai_colors)
+            if saved is False:
+                QMessageBox.warning(self, "AI 색상", "이 창에는 적용했지만 설정 파일을 저장하지 못했습니다.")
+        if self.index:
+            for ai in (*AIS, UNKNOWN):
+                node = self.nodes.get("ai:" + ai)
+                if node:
+                    node.setForeground(0, QColor(text_color(self.ai_colors[ai])))
+            if self.search.text().strip():
+                self.run_search()
+            else:
+                self.rerender()
+            if selected_data:
+                for position in range(self.list.topLevelItemCount()):
+                    item = self.list.topLevelItem(position)
+                    if item.data(0, ROLE) == selected_data:
+                        self.list.setCurrentItem(item)
+                        break
+            if selected_job and selected_job in self.index.jobs:
+                self.current_job = selected_job
+                self.show_phases = show_phases
+                self.show_job(selected_job)
+            elif preview_path and preview_kind in ("markdown", "text", "json", "image", "pdf", "binary", "error"):
+                self.show_path(preview_path)
+        self.list.viewport().update()
+        self.job_list.viewport().update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "cards_area"):
+            QTimer.singleShot(0, self, self.layout_cards)
+
+    def update_root_button(self):
+        name = "primary" if not self.root else ""
+        if self.root_button.objectName() != name:
+            self.root_button.setObjectName(name)
+            self.root_button.style().unpolish(self.root_button)
+            self.root_button.style().polish(self.root_button)
 
     # ----- data ---------------------------------------------------------
     def reload(self):
@@ -652,6 +977,7 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
         self.root_label.setText(str(self.index.root))
         self.root_label.setToolTip(str(self.index.root))
+        self.update_root_button()
         self.populate_tree()
         if keep and keep != "overview":
             self.restore_node(keep)
@@ -735,7 +1061,8 @@ class MainWindow(QMainWindow):
                 count += len(index.chatgpt_prompts()) + len(self.conversations)
             if ai == UNKNOWN and not count:
                 continue
-            self.nodes["ai:" + ai] = self.add_node(history, AI_LABELS[ai], ("ai", ai), count, AI_COLORS[ai])
+            self.nodes["ai:" + ai] = self.add_node(history, AI_LABELS[ai], ("ai", ai), count, text_color(self.ai_colors[ai]))
+            self.nodes["ai:" + ai].setIcon(0, ai_icon(ai))
         dates = self.add_node(history, "날짜별", None)
         days = defaultdict(list)
         for job in index.sorted_jobs():
@@ -930,6 +1257,7 @@ class MainWindow(QMainWindow):
             parts = [roles_text(job), f"파일 {len(index.job_files(job.id))}개", names]
             item = QListWidgetItem(job.full_title)  # uncut: the card wraps it to the real width
             item.setData(ROLE, ("job", job.id))
+            item.setData(AI_ROLE, sorted(job.ais, key=lambda ai: (ai != job.implementer, ai)))
             item.setData(CARD_ROLE, {"status": status_text(job), "group": status_group(job),
                                      "meta": " · ".join(part for part in parts if part)})
             item.setToolTip("\n\n".join(dict.fromkeys(
@@ -956,7 +1284,7 @@ class MainWindow(QMainWindow):
             repair = sum(1 for job in jobs if status_group(job) == "repair")
             lines = [group_label(group), f"작업 {len(jobs)}건 · 파일 {len(index.group_files(group)):,}개",
                      f"최근 작업 {last:%Y-%m-%d}" if last else "작업 기록 없음", f"수정 필요 {repair}건"]
-            card = QPushButton("\n".join(lines), objectName="projectCard")
+            card = ProjectCard("\n".join(lines), objectName="projectCard")
             card.setCursor(Qt.CursorShape.PointingHandCursor)
             card.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)  # equal columns
             card.setToolTip("\n".join([group or str(index.root), *lines[1:]]))
@@ -973,21 +1301,30 @@ class MainWindow(QMainWindow):
         needed = CARD_PADDING + max(card.fontMetrics().horizontalAdvance(line)
                                     for card in self.cards.values() for line in card.text().splitlines())
         columns = max(1, min(CARD_COLUMNS, (self.cards_area.viewport().width() + spacing) // (needed + spacing)))
-        if columns == self.card_columns:
-            return
-        self.card_columns = columns
-        while self.cards_grid.count():
-            self.cards_grid.takeAt(0)
-        for position, card in enumerate(self.cards.values()):
-            self.cards_grid.addWidget(card, position // columns, position % columns)
+        if columns != self.card_columns:
+            self.card_columns = columns
+            while self.cards_grid.count():
+                self.cards_grid.takeAt(0)
+            for position, card in enumerate(self.cards.values()):
+                self.cards_grid.addWidget(card, position // columns, position % columns)
         rows = (len(self.cards) + columns - 1) // columns
-        self.cards_area.setFixedHeight(min(rows, CARD_ROWS_SHOWN) * CARD_HEIGHT)
+        card_width = max(1, (self.cards_area.viewport().width() - (columns - 1) * spacing) // columns)
+        heights = [CARD_HEIGHT] * rows
+        for position, card in enumerate(self.cards.values()):
+            row = position // columns
+            heights[row] = max(heights[row], card.heightForWidth(card_width))
+        for position, card in enumerate(self.cards.values()):
+            card.setFixedHeight(heights[position // columns])
+        self.cards_box.setMinimumHeight(sum(heights) + (rows - 1) * spacing)
+        visible_rows = min(rows, 2 if columns == 1 else CARD_ROWS_SHOWN)
+        preferred = sum(heights[:visible_rows]) + (visible_rows - 1) * spacing + 2
+        self.cards_area.setFixedHeight(min(preferred, max(96, int(self.center.height() * .4))))
 
     def render_home(self):
         index = self.index
         self.show_rows(jobs=index.sorted_jobs()[:RECENT_JOBS], projects=True)
         self.fill_cards()
-        self.set_page("홈", str(index.root), "jobs", cards=bool(self.cards), section="최근 작업")
+        self.set_page("홈", "프로젝트와 최근 작업을 한눈에 확인하세요.", "jobs", cards=bool(self.cards), section="최근 작업")
         self.layout_cards()
         self.show_overview()
 
@@ -1066,7 +1403,7 @@ class MainWindow(QMainWindow):
             jobs = sorted({job_id for entry in files for job_id in entry.jobs}, reverse=True)
             self.preview.show_html(
                 f"{project.key}/{folder}", escape(str(path)),
-                f"<p>파일 {len(files)}개 (하위 폴더 포함)</p><p>{ai_badges_html(self.ais_of(jobs))}</p>"
+                f"<p>파일 {len(files)}개 (하위 폴더 포함)</p><p>{self.ai_badges_html(self.ais_of(jobs))}</p>"
                 + "".join(f'<p><a href="hub:job/{escape(job_id)}">{escape(index.jobs[job_id].title)}</a></p>'
                           for job_id in jobs), path, kind="folder")
 
@@ -1106,7 +1443,7 @@ class MainWindow(QMainWindow):
             self.show_rows(jobs=jobs, projects=True)
             self.set_page(key, f"작업 {len(jobs)}건", "jobs")
             self.preview.show_html(key, f"작업 {len(jobs)}건", "".join(
-                f'<p><a href="hub:job/{escape(job.id)}">{escape(job.title)}</a><br>{ai_badges_html(job.ais, job.roles())}</p>'
+                f'<p><a href="hub:job/{escape(job.id)}">{escape(job.title)}</a><br>{self.ai_badges_html(job.ais, job.roles())}</p>'
                 for job in jobs))
         elif kind == "cleanup":
             files = stale_files(index, STALE_DAYS[0], unlinked_only=True)
@@ -1144,7 +1481,7 @@ class MainWindow(QMainWindow):
                 title, f"파일 {len(files)}개 · 합계 {human_size(total)}",
                 f"<p>마지막 <b>수정</b> 시각이 {STALE_LABELS[int(days)]} 지난 파일, 오래된 순.</p>"
                 + ("<p>그중 어떤 작업의 task.json 파일 목록에도 없는 파일만 표시.</p>" if flag else "")
-                + "<p style='color:#75798F'>마지막으로 연 시각은 미리보기·백신 검사·OneDrive 동기화만으로도 바뀌어 "
+                + "<p style='color:#676B80'>마지막으로 연 시각은 미리보기·백신 검사·OneDrive 동기화만으로도 바뀌어 "
                   "판단 근거로 쓰지 않음. 실제로 쓰지 않는 파일인지는 직접 확인 필요.</p>"
                   "<p>파일을 하나 또는 여러 개 고른 뒤 <b>우클릭</b>해서 복사·이동·휴지통으로 삭제.</p>",
                 kind="stale")
@@ -1169,8 +1506,26 @@ class MainWindow(QMainWindow):
         return result
 
     def save_column_widths(self):
+        self.custom_columns = True
         if self.settings is not None:
             self.settings.update(list_columns=[self.list.columnWidth(column) for column in range(len(COLUMNS))])
+
+    def on_column_resized(self, *_):
+        if not self.adjusting_columns:
+            self.custom_columns = True
+            self.column_timer.start()
+
+    def fit_default_columns(self):
+        if self.custom_columns:
+            return
+        width = self.list.viewport().width()
+        widths = [48, max(100, width - 404), 94, 92, 72, 98]
+        self.adjusting_columns = True
+        try:
+            for column, value in enumerate(widths):
+                self.list.setColumnWidth(column, value)
+        finally:
+            self.adjusting_columns = False
 
     def ais_of(self, job_ids):
         found = set()
@@ -1192,7 +1547,7 @@ class MainWindow(QMainWindow):
         for entry in files:
             # A linked file takes the colour of the most recent job that lists it.
             latest = index.jobs[max(entry.jobs)] if entry.jobs else None
-            rows.append((["파일", entry.rel, ai_text(index.file_ais(entry)),
+            rows.append((["파일", entry.path.name, ai_text(index.file_ais(entry)),
                           f"작업 {len(entry.jobs)}건" if entry.jobs else ("ChatGPT 프롬프트" if entry.chatgpt_prompt else "미분류"),
                           human_size(entry.size), fmt_time(entry.mtime)],
                          ("file", rel_key(entry.rel)), entry.rel, entry.size, entry.mtime,
@@ -1206,8 +1561,22 @@ class MainWindow(QMainWindow):
         items = []
         for values, data, tip, size, stamp, group, size_tip in rows:
             item = SortItem(values)
+            # Keep year/full precision available without spending a wide column on every row.
+            if stamp is not None:
+                item.setToolTip(DATE_COLUMN, fmt_time(stamp))
+                item.setText(DATE_COLUMN, datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M"))
             item.setData(0, ROLE, data)
+            if data[0] == "job":
+                ais = index.jobs[data[1]].ais
+            elif data[0] == "file":
+                entry = index.files[data[1]]
+                ais = index.file_ais(entry) or ({"chatgpt"} if entry.chatgpt_prompt else set())
+            else:
+                ais = {"chatgpt"}
+            item.setData(0, AI_ROLE, sorted(ais))
+            item.setToolTip(2, ai_text(ais))
             item.setToolTip(1, tip[:600])
+            item.setToolTip(3, values[3])
             item.setTextAlignment(SIZE_COLUMN, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             if size_tip:
                 item.setToolTip(SIZE_COLUMN, size_tip)
@@ -1219,6 +1588,8 @@ class MainWindow(QMainWindow):
                 item.setData(0, GROUP_ROLE, group)  # painted by StatusDelegate
             items.append(item)
         self.list.addTopLevelItems(items)
+        self.list.empty_label.setGeometry(self.list.viewport().rect())
+        self.list.empty_label.setVisible(not items)
         self.list.setSortingEnabled(True)
         self.list.sortByColumn(*sort)
         return len(items)
@@ -1359,9 +1730,18 @@ class MainWindow(QMainWindow):
             self.show_path(Path(unquote(link[len("hub:file/"):])))
         elif link.startswith("hub:node/"):
             self.select_node(link[len("hub:node/"):])
+        elif link.startswith("hub:continue/"):
+            self.copy_continue_request(link[len("hub:continue/"):])
         elif link == "hub:toggle/phases" and self.current_job in self.index.jobs:
             self.show_phases = not self.show_phases
             self.show_job(self.current_job)
+
+    def copy_continue_request(self, job_id):
+        job = self.index.jobs.get(job_id) if self.index else None
+        if job is None:
+            return
+        QApplication.clipboard().setText(continue_request(job))
+        self.statusBar().showMessage("이어가기 요청을 복사했습니다 · Claude·Codex 채팅에 붙여 넣으세요")
 
     def show_path(self, path):
         entry = self.index.files.get(rel_key(path.relative_to(self.index.root).as_posix())) \
@@ -1386,7 +1766,7 @@ class MainWindow(QMainWindow):
         if entry.chatgpt_prompt:
             roles.setdefault("chatgpt", []).append("프롬프트 대상")
         meta = (f"{escape(entry.rel)} · {human_size(entry.size)} · {fmt_time(entry.mtime)}<br>"
-                f"{ai_badges_html(ais, roles)}" + (f"<br>작업: {links}" if links else ""))
+                f"{self.ai_badges_html(ais, roles)}" + (f"<br>작업: {links}" if links else ""))
         return self.preview.show_file(entry.path, entry.name, meta)
 
     def show_job(self, job_id):
@@ -1398,17 +1778,17 @@ class MainWindow(QMainWindow):
         rows, steps = [], []
         for phase in job.phases:
             who = AI_LABELS.get(phase.provider, phase.provider) + (f" ({phase.model})" if phase.model else "")
-            color = AI_COLORS.get(phase.provider, "#7A7F93")
+            color = text_color(self.ai_colors.get(phase.provider, "#7A7F93"))
             action = ACTION_LABELS.get(phase.action, phase.action)
             steps.append(f'{escape(action)} <span style="color:{color}"><b>{escape(who)}</b></span>')
             files = " · ".join(self.file_link(path) for path in phase.files[:12])
             notes = escape(phase.notes[:400] + ("…" if len(phase.notes) > 400 else ""))
             error = f'<br><span style="color:#B42318">{escape(phase.error[:300])}</span>' if phase.error else ""
-            rows.append(f'<tr><td style="padding:4px 8px 4px 0;vertical-align:top"><b>{escape(phase.name)}</b></td>'
-                        f'<td style="padding:4px 8px;vertical-align:top">{escape(action)}</td>'
-                        f'<td style="padding:4px 8px;vertical-align:top;color:{color}"><b>{escape(who)}</b></td>'
-                        f'<td style="padding:4px 8px;vertical-align:top">{escape(STATUS_LABELS.get(phase.outcome, phase.outcome))}'
-                        f'{"<br><span style=color:#75798F>" + notes + "</span>" if notes else ""}{error}'
+            rows.append(f'<tr><td style="padding:6px 12px 6px 0;vertical-align:top"><b>{escape(phase.name)}</b></td>'
+                        f'<td style="padding:6px 12px;vertical-align:top">{escape(action)}</td>'
+                        f'<td style="padding:6px 12px;vertical-align:top;color:{color}"><b>{escape(who)}</b></td>'
+                        f'<td style="padding:6px 12px;vertical-align:top">{escape(STATUS_LABELS.get(phase.outcome, phase.outcome))}'
+                        f'{"<br><span style=color:#676B80>" + notes + "</span>" if notes else ""}{error}'
                         f'{"<br>" + files if files else ""}</td></tr>')
         task_files = []
         for item in job.files:
@@ -1435,14 +1815,17 @@ class MainWindow(QMainWindow):
             counts[phase.action] += 1
         verdict += [f"{ACTION_LABELS[action]} {counts[action]}회" for action in ("check", "review") if counts[action]]
         toggle = (f'<a href="hub:toggle/phases">{"단계별 로그 접기" if self.show_phases else "단계별 로그 보기"}</a>'
-                  f' <span style="color:#75798F">({len(job.phases)}단계)</span>')
+                  f' <span style="color:#676B80">({len(job.phases)}단계)</span>')
         detail = (f"<table>{''.join(rows) or '<tr><td>기록 없음</td></tr>'}</table>" if self.show_phases else "")
-        html = (f"{problems}<h3>요청 원문</h3><p style='white-space:pre-wrap'>{escape(job.request) or '없음'}</p>"
+        resume = (f'<p><a href="hub:continue/{escape(job.id)}">이어가기 요청 복사</a><br>'
+                  '<span style="color:#676B80">복사한 요청을 Claude·Codex 채팅에 붙여 넣으면 '
+                  '이 작업 기록을 읽고 이어서 진행합니다.</span></p>')
+        html = (f"{resume}{problems}<h3>요청 원문</h3><p style='white-space:pre-wrap'>{escape(job.request) or '없음'}</p>"
                 f"<h3>결과 파일</h3><ul>{''.join(task_files) or '<li>없음</li>'}</ul>"
                 f"<h3>검사와 검토</h3><p>{escape(' · '.join(verdict))}</p>"
-                f"<p>{ai_badges_html(job.ais, job.roles())}</p>"
+                f"<p>{self.ai_badges_html(job.ais, job.roles())}</p>"
                 f"<p>{' → '.join(steps) or '단계 기록 없음'}</p>"
-                f"<p style='color:#75798F'>역할은 manifest의 implementer와 단계별 model 기록만 근거로 표시.</p>"
+                f"<p style='color:#676B80'>역할은 manifest의 implementer와 단계별 model 기록만 근거로 표시.</p>"
                 f"<p>{toggle}</p>{detail}"
                 f"<h3>목표</h3><p style='white-space:pre-wrap'>{escape(job.goal) or '없음'}</p>"
                 f"<h3>완료 기준</h3><ul>{acceptance or '<li>없음</li>'}</ul>"
@@ -1460,6 +1843,7 @@ class MainWindow(QMainWindow):
         self.preview.show_html(conv.title, f"ChatGPT 대화 · 메시지 {len(conv.messages)} · {fmt_time(conv.when)}",
                                "", Path(self.export_path) if self.export_path else None, kind="conversation")
         self.preview.browser.setMarkdown(chatgpt.to_markdown(conv))
+        self.preview.browser.document().setDocumentMargin(0)
 
     def show_overview(self):
         index = self.index
@@ -1472,15 +1856,17 @@ class MainWindow(QMainWindow):
             else:
                 implemented = sum(1 for job in jobs if job.implementer == ai)
                 detail = f"참여 작업 {len(jobs)}건 · 구현 {implemented}건 · 계획/검토 {len(jobs) - implemented}건"
-            cards.append(f'<p><a href="hub:node/ai:{ai}" style="color:{AI_COLORS[ai]};font-size:15px;font-weight:700;'
-                         f'text-decoration:none">{AI_LABELS[ai]}</a><br>{detail}</p>')
+            cards.append(f'<p style="margin-top:18px;margin-bottom:4px">{icon_html(ai, 22)}'
+                         f'<a href="hub:node/ai:{ai}" style="color:{text_color(self.ai_colors[ai])};'
+                         f'font-size:12pt;font-weight:700;text-decoration:none">{AI_LABELS[ai]}</a></p>'
+                         f'<p style="margin-bottom:16px">{detail}</p>')
         recent = "".join(f'<li><a href="hub:job/{escape(job.id)}">{escape(job.title)}</a> '
-                         f'<span style="color:#75798F">{fmt_time(job.when)}</span></li>'
+                         f'<span style="color:#676B80">{fmt_time(job.when)}</span></li>'
                          for job in index.sorted_jobs()[:8])
-        html = ("<h3>AI별 참여</h3>" + "".join(cards)
-                + f"<h3>최근 작업</h3><ul>{recent or '<li>없음</li>'}</ul>"
-                + f"<p style='color:#75798F'>미분류 파일 {len(index.unclassified()):,}개 · 둘러보기만으로는 파일을 바꾸지 않음. "
-                  "복사·이동·휴지통 삭제는 파일 목록 우클릭에서 확인 후 실행.</p>")
+        html = ('<h3 style="margin-top:0">AI별 참여</h3>' + "".join(cards)
+                + "<h3>최근 작업</h3>"
+                + (f"<ul>{recent}</ul>" if recent else '<p style="color:#676B80">아직 작업 기록이 없습니다.</p>')
+                + f"<p style='color:#676B80'>미분류 파일 {len(index.unclassified()):,}개</p>")
         self.preview.show_html("홈", escape(str(index.root)), html, index.root, kind="overview")
 
     def show_history(self, jobs):
@@ -1491,7 +1877,7 @@ class MainWindow(QMainWindow):
         self.preview.show_html("전체 작업 이력", f"작업 {len(jobs)}건",
                                f"<p>{escape(summary) or '작업 기록 없음'}</p>"
                                "<p>작업을 고르면 요청, 결과 파일, 검사·검토 결과를 표시.</p>"
-                               "<p style='color:#75798F'>왼쪽에서 AI별·날짜별로 좁혀 볼 수 있음.</p>", kind="history")
+                               "<p style='color:#676B80'>왼쪽에서 AI별·날짜별로 좁혀 볼 수 있음.</p>", kind="history")
 
     def show_group(self, group, jobs, files, results):
         index = self.index
@@ -1501,12 +1887,12 @@ class MainWindow(QMainWindow):
         linked = sum(1 for entry in files if entry.jobs)
         readme = index.files.get(rel_key(f"{group}/README.md")) if group and group != NO_GROUP else None
         recent = "".join(f'<li><a href="hub:job/{escape(job.id)}">{escape(job.title)}</a> '
-                         f'<span style="color:#75798F">{fmt_time(job.when)}</span></li>' for job in jobs[:5])
-        html = (f"<p>{ai_badges_html(ais)}</p>"
+                         f'<span style="color:#676B80">{fmt_time(job.when)}</span></li>' for job in jobs[:5])
+        html = (f"<p>{self.ai_badges_html(ais)}</p>"
                 f"<p>작업 {len(jobs)}건 · 파일 {len(files):,}개 · 결과물 {len(results):,}개 · "
                 f"작업과 직접 연결된 파일 {linked:,}개</p>"
                 f"<h3>최근 작업</h3><ul>{recent or '<li>작업 기록 없음</li>'}</ul>"
-                "<p style='color:#75798F'>이 프로젝트의 작업은 그 작업의 파일 목록에 이 프로젝트 폴더의 파일이 "
+                "<p style='color:#676B80'>이 프로젝트의 작업은 그 작업의 파일 목록에 이 프로젝트 폴더의 파일이 "
                 "있다는 뜻이며, 폴더의 모든 파일을 그 AI가 만들었다는 근거는 아님. 결과물은 문서·실행 파일·"
                 "이미지처럼 열어 볼 파일만 모은 것이고 검증·테스트·기록 폴더는 제외.</p>")
         if readme is not None:
@@ -1525,8 +1911,9 @@ class MainWindow(QMainWindow):
         extra = ""
         if ai == "chatgpt":
             extra = (f"<p>프롬프트 파일 {len(index.chatgpt_prompts())}개, 가져온 대화 {len(self.conversations)}건.</p>"
-                     "<p style='color:#75798F'>ChatGPT 웹 대화는 로컬 기록이 없어 데이터 내보내기 파일을 열어야 표시.</p>")
-        self.preview.show_html(AI_LABELS[ai], summary, f"<p>{escape(summary)}</p>{extra}", kind="ai")
+                     "<p style='color:#676B80'>ChatGPT 웹 대화는 로컬 기록이 없어 데이터 내보내기 파일을 열어야 표시.</p>")
+        self.preview.show_html(AI_LABELS[ai], summary,
+                               f'<p>{self.ai_badges_html({ai})}</p><p>{escape(summary)}</p>{extra}', kind="ai")
 
     def show_project(self, project):
         index = self.index
@@ -1534,13 +1921,13 @@ class MainWindow(QMainWindow):
         linked = sum(1 for entry in project.files if entry.jobs)
         readme = next((entry for entry in project.files if entry.path.parent == project.path
                        and entry.name.lower() == "readme.md"), None)
-        html = (f"<p>{ai_badges_html(index.project_ais(project))}</p>"
+        html = (f"<p>{self.ai_badges_html(index.project_ais(project))}</p>"
                 f"<p>파일 {len(project.files)}개{' (일부만 표시)' if project.truncated else ''} · "
                 f"작업과 직접 연결된 파일 {linked}개</p>"
                 "<h3>관련 작업</h3><ul>" + ("".join(
-                    f'<li><a href="hub:job/{escape(job.id)}">{escape(job.title)}</a> {ai_badges_html(job.ais, job.roles())}</li>'
+                    f'<li><a href="hub:job/{escape(job.id)}">{escape(job.title)}</a> {self.ai_badges_html(job.ais, job.roles())}</li>'
                     for job in jobs) or "<li>작업 기록 없음 · AI 미분류</li>") + "</ul>"
-                "<p style='color:#75798F'>프로젝트 관련 작업은 그 작업의 파일 목록이 이 폴더를 포함한다는 뜻이며, "
+                "<p style='color:#676B80'>프로젝트 관련 작업은 그 작업의 파일 목록이 이 폴더를 포함한다는 뜻이며, "
                 "폴더의 모든 파일을 그 AI가 만들었다는 근거는 아님.</p>")
         if readme:
             html += f"<p>{self.file_link(readme.path, 'README.md 보기')}</p>"
@@ -1567,8 +1954,9 @@ class Settings(dict):
             temp = self.path.with_suffix(".tmp")
             temp.write_text(json.dumps(dict(self), ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(temp, self.path)
+            return True
         except OSError:
-            pass
+            return False
 
 
 def default_settings_path():
