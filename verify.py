@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import argparse
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -12,10 +13,13 @@ from indexer import find_root  # noqa: E402
 
 # The app may sit directly in the workspace or inside a numbered project folder (03_AI-Hub/ai-hub).
 WORKSPACE = find_root(ROOT.parent) or ROOT.parent
-SOURCES = ("app.py", "ui.py", "indexer.py", "preview.py", "chatgpt.py", "fileops.py", "smoke.py", "build.py")
+SOURCES = ("app.py", "ui.py", "appearance.py", "indexer.py", "preview.py", "chatgpt.py", "fileops.py", "smoke.py", "build.py")
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=Path, default=WORKSPACE, help="Read-only workspace to check (may be empty)")
+    workspace = parser.parse_args().root.resolve()
     temp = ROOT / ".build" / "tmp"
     temp.mkdir(parents=True, exist_ok=True)
     results = ROOT / "verification"
@@ -31,7 +35,9 @@ def main():
         if not exe.exists():
             print("Missing packaged EXE; run build.py first")
             summary["exe"] = "missing"
-        elif exe.stat().st_mtime < max((ROOT / name).stat().st_mtime for name in SOURCES):
+        elif exe.stat().st_mtime < max(path.stat().st_mtime for path in
+                                     [*(ROOT / name for name in SOURCES),
+                                      *(path for path in (ROOT / "assets").rglob("*") if path.is_file())]):
             print("AIHub.exe is older than the sources; run build.py again")
             summary["exe"] = "stale"
         else:
@@ -41,7 +47,7 @@ def main():
             for platform in platforms:
                 report = results / f"packaged-{platform}.json"
                 report.unlink(missing_ok=True)
-                run = subprocess.run([str(exe), "--smoke-test", str(report), "--real-root", str(WORKSPACE)],
+                run = subprocess.run([str(exe), "--smoke-test", str(report), "--real-root", str(workspace)],
                                      cwd=ROOT, env=env | {"QT_QPA_PLATFORM": platform}, timeout=180)
                 data = json.loads(report.read_text(encoding="utf-8")) if report.exists() else {}
                 summary[platform] = {
@@ -52,7 +58,7 @@ def main():
     platforms = [value for key, value in summary.items() if isinstance(value, dict)]
     summary["passed"] = (summary["tests_passed"] and bool(platforms) and all(
         item["exit_code"] == 0 and item["passed"] and item["packaged"] and item["real_unchanged"] is True
-        and item["workspace_unchanged"] is True and (item["real_jobs"] or 0) > 0 for item in platforms))
+        and item["workspace_unchanged"] is True for item in platforms))
     (results / "result.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if summary["passed"] else 1

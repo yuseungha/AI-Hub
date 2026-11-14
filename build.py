@@ -28,6 +28,7 @@ def main():
     if not make_icon().pixmap(256, 256).save(str(icon)):
         raise RuntimeError("Could not generate app icon")
     command = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--windowed",
+               "--add-data", str(ROOT / "assets") + os.pathsep + "assets",
                "--copy-metadata", "pypdf", "--hidden-import", "smoke",
                "--name", "AIHub", "--icon", str(icon), "--distpath", str(ROOT / "dist"),
                "--workpath", str(BUILD / "work"), "--specpath", str(BUILD),
